@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { categoryAverage, isValidPoints, normalizeWeights, subjectScore, type Category } from './grades';
+import { categoryAverage, isValidPoints, isValidValue, normalizeWeights, scalePos, subjectScore, type Category } from './grades';
 const cats: Category[] = [
   { id: 'k', name: 'Klausuren', weight: 50, active: true },
   { id: 'm', name: 'Mündlich', weight: 30, active: true },
@@ -29,5 +29,19 @@ describe('grades', () => {
     const bad = cats.map(c => ({ ...c, weight: c.weight / 2 }));
     expect(subjectScore(bad, []).valid).toBe(false);
     expect(subjectScore(normalizeWeights(bad), [{ categoryId: 'k', points: 15 }]).score).toBe(15);
+  });
+});
+
+describe('Skalen', () => {
+  it('Mittelstufe erlaubt Noten 1 bis 6', () => {
+    expect(isValidValue(1, 'mittelstufe')).toBe(true); expect(isValidValue(6, 'mittelstufe')).toBe(true);
+    expect(isValidValue(0, 'mittelstufe')).toBe(false); expect(isValidValue(7, 'mittelstufe')).toBe(false);
+    expect(isValidValue(2.5, 'mittelstufe', true)).toBe(true); expect(isValidValue(2.5, 'mittelstufe')).toBe(false);
+  });
+  it('Oberstufe erlaubt 0 bis 15', () => {
+    expect(isValidValue(0, 'oberstufe')).toBe(true); expect(isValidValue(15, 'oberstufe')).toBe(true); expect(isValidValue(16, 'oberstufe')).toBe(false);
+  });
+  it('Position: bei Noten ist 1 oben', () => {
+    expect(scalePos(1, 'mittelstufe')).toBe(1); expect(scalePos(6, 'mittelstufe')).toBe(0); expect(scalePos(15, 'oberstufe')).toBe(1);
   });
 });

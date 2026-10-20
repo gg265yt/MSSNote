@@ -41,3 +41,18 @@ export function subjectScore(categories: Category[], grades: Grade[], mode: Miss
   const score = rated.reduce((s, x) => s + (x.average as number) * x.weight, 0) / usedWeight;
   return { score, complete, weightSum: sum, valid: true, steps };
 }
+
+export type Level = 'oberstufe' | 'mittelstufe';
+export const SCALE = {
+  oberstufe: { min: 0, max: 15, unit: 'Punkte', label: 'Punkte (0 bis 15)', ticks: [0, 5, 10, 15] },
+  mittelstufe: { min: 1, max: 6, unit: 'Note', label: 'Note (1 bis 6)', ticks: [6, 5, 4, 3, 2, 1] },
+} as const;
+export function isValidValue(v: number, level: Level, half = false): boolean {
+  const { min, max } = SCALE[level];
+  return Number.isFinite(v) && v >= min && v <= max && (half ? v * 2 : v) % 1 === 0;
+}
+/** Position 0..1 auf der Skala, 1 = beste Leistung (bei Noten ist die 1 am besten). */
+export function scalePos(v: number, level: Level): number {
+  const p = level === 'oberstufe' ? v / 15 : (6 - v) / 5;
+  return Math.min(1, Math.max(0, p));
+}
