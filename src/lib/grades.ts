@@ -1,7 +1,7 @@
 export type Category = { id: string; name: string; weight: number; active: boolean };
 export type Grade = { categoryId: string; points: number };
 export type MissingMode = 'renormalize' | 'strict';
-export type Step = { category: string; average: number | null; weight: number; used: boolean };
+export type Step = { category: string; count: number; average: number | null; weight: number; used: boolean };
 export type SubjectResult = {
   score: number | null; complete: boolean; weightSum: number; valid: boolean; steps: Step[]; reason?: string;
 };
@@ -28,7 +28,7 @@ export function normalizeWeights(categories: Category[]): Category[] {
 export function subjectScore(categories: Category[], grades: Grade[], mode: MissingMode = 'renormalize'): SubjectResult {
   const active = categories.filter(c => c.active);
   const sum = weightSum(categories);
-  const steps: Step[] = active.map(c => ({ category: c.name, average: categoryAverage(grades, c.id), weight: c.weight, used: false }));
+  const steps: Step[] = active.map(c => ({ category: c.name, count: grades.filter(g => g.categoryId === c.id).length, average: categoryAverage(grades, c.id), weight: c.weight, used: false }));
   if (Math.abs(sum - 100) > EPS)
     return { score: null, complete: false, weightSum: sum, valid: false, steps, reason: 'Gewichtungen ergeben nicht 100 %.' };
   const rated = steps.filter(s => s.average !== null);
