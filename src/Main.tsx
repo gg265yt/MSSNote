@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
-import { isValidPoints, normalizeWeights, subjectScore, type MissingMode } from './lib/grades';
+import { SCALE, isValidValue, normalizeWeights, scalePos, subjectScore, type Level, type MissingMode } from './lib/grades';
 import type { Cat, Grade, Profile, Semester, Subject } from './types';
 
 const f = (n: number | null) => (n == null ? '–' : n.toLocaleString('de-DE', { maximumFractionDigits: 2 }));
-const DEFAULT_CATS: [string, number][] = [['Klausuren', 50], ['Mündliche Mitarbeit', 30], ['Tests', 20]];
+const DEFAULT_WEIGHTS = [{ name: 'Klausuren', weight: 50 }, { name: 'Mündliche Mitarbeit', weight: 30 }, { name: 'Tests', weight: 20 }];
 type Data = { sems: Semester[]; subjects: Subject[]; cats: Cat[]; grades: Grade[] };
 type SubjectValues = { name: string; short_name: string; kind: 'grundfach' | 'leistungsfach'; color: string; semester: string };
+const lv = (s: Subject): Level => s.level ?? 'oberstufe';
 const semOf = (sems: Semester[], s: Subject) => sems.find(x => x.id === s.semester_id)?.label;
 type Res = PromiseLike<{ error: { message: string } | null }>;
 
@@ -15,13 +16,16 @@ const scoreOf = (cats: Cat[], grades: Grade[], mode: MissingMode) =>
   subjectScore(cats.map(c => ({ id: c.id, name: c.name, weight: c.weight, active: c.active })), grades.map(g => ({ categoryId: g.category_id, points: g.points })), mode);
 
 export default function Main({ user }: { user: User }) {
-  const [d, setD] = useState<Data | null>(null);
+  const [d0, setD0] = useState<Data | null>(null);
   const [err, setErr] = useState('');
   const [sel, setSel] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [sorting, setSorting] = useState(false);
-  const [prof, setProf] = useState<Profile>({ half_points: false, theme: 'system', missing_category_mode: 'renormalize' });
+  const [prof, setProf] = useState<Profile>({ half_points: false, theme: 'system', missing_category_mode: 'renormalize', school_level: 'oberstufe', default_weights: DEFAULT_WEIGHTS });
   const [view, setView] = useState<'home' | 'settings'>('home');
+  const lvl = prof.school_level;
+  const mode = prof.missing_category_mode;
+  const d = d0 ? { ...d0, subjects: d0.subjects.filter(x => lv(x) === lvl) } : null;
   useEffect(() => {
     if (prof.theme === 'system') delete document.documentElement.dataset.theme;
     else document.documentElement.dataset.theme = prof.theme;
@@ -38,8 +42,8 @@ export default function Main({ user }: { user: User }) {
     const e = s.error || c.error || g.error || se.error;
     if (e) { setErr('Daten konnten nicht geladen werden: ' + e.message + ' (Wurde die SQL-Datei ausgeführt?)'); return; }
     setErr('');
-    if (pr.data) setProf({ half_points: !!pr.data.half_points, theme: pr.data.theme, missing_category_mode: pr.data.missing_category_mode });
-    setD({ sems: se.data as Semester[], subjects: s.data as Subject[], cats: (c.data as Cat[]).map(x => ({ ...x, weight: Number(x.weight) })), grades: (g.data as Grade[]).map(x => ({ ...x, points: Number(x.points) })) });
+    if (pr.data) setProf({ half_points: !!pr.data.half_points, theme: pr.data.theme, missing_category_mode: pr.data.missing_category_mode, school_level: pr.data.school_level === 'mittelstufe' ? 'mittelstufe' : 'oberstufe', default_weights: Array.isArray(pr.data.default_weights) ? pr.data.default_weights : DEFAULT_WEIGHTS });
+    setD0({ sems: se.data as Semester[], subjects: s.data as Subject[], cats: (c.data as Cat[]).map(x => ({ ...x, weight: Number(x.weight) })), grades: (g.data as Grade[]).map(x => ({ ...x, points: Number(x.points) })) });
   }, [user.id]);
   useEffect(() => { reload(); }, [reload]);
   const savePref = (patch: Partial<Profile>) => { setProf({ ...prof, ...patch }); run(supabase.from('profiles').upsert({ id: user.id, ...patch })); };
@@ -60,9 +64,10 @@ export default function Main({ user }: { user: User }) {
     }
     const row = { name: v.name.trim(), short_name: v.short_name.trim() || null, kind: v.kind, color: v.color, semester_id };
     if (id) { await run(supabase.from('subjects').update(row).eq('id', id)); return null; }
-    const { data, error } = await supabase.from('subjects').insert({ ...row, sort_order: d.subjects.length }).select().single();
+    const { data, error } = await supabase.from('subjects').insert({ ...row, level: lvl, sort_order: d.subjects.length }).select().single();
     if (error || !data) return error?.message ?? 'Fach konnte nicht angelegt werden.';
-    await run(supabase.from('categories').insert(DEFAULT_CATS.map(([n, w]) => ({ subject_id: data.id, name: n, weight: w }))));
+    if (!prof.default_weights.length) { await run(Promise.resolve({ error: null })); return null; }
+    await run(supabase.from('categories').insert(prof.default_weights.map(w => ({ subject_id: data.id, name: w.name, weight: w.weight }))));
     return null;
   }
   async function move(i: number, dir: number) {
@@ -83,15 +88,15 @@ export default function Main({ user }: { user: User }) {
     return <main>{header}{err && <div className="alert" role="alert">{err}</div>}
       <SubjectView s={subject} cats={d.cats.filter(c => c.subject_id === subject.id)} grades={d.grades.filter(g => g.subject_id === subject.id)} run={run} setErr={setErr} back={() => setSel(null)} half={prof.half_points} mode={prof.missing_category_mode} sems={d.sems} save={saveSubject} /></main>;
 
-  if (view === 'settings') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Settings prof={prof} save={savePref} d={d} back={() => setView('home')} /></main>;
+  if (view === 'settings') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Settings prof={prof} save={savePref} all={d0 as Data} back={() => setView('home')} /></main>;
   const results = d.subjects.map(s => ({ s, r: scoreOf(d.cats.filter(c => c.subject_id === s.id), d.grades.filter(g => g.subject_id === s.id), prof.missing_category_mode) }));
   const ok = results.filter(x => x.r.score !== null);
   const avg = ok.length ? ok.reduce((a, x) => a + (x.r.score as number), 0) / ok.length : null;
   return (
     <main>{header}{err && <div className="alert" role="alert">{err}</div>}
       <div className="card">
-        <div className="big">{f(avg)} <span className="mut" style={{ fontSize: '1rem' }}>Ø Punkte</span></div>
-        <p className="mut">Aus {ok.length} von {d.subjects.length} Fächern. {avg != null && <>Näherung Note: {f((17 - avg) / 3)} (keine offizielle Abiturprognose).</>}</p>
+        <div className="big">{f(avg)} <span className="mut" style={{ fontSize: '1rem' }}>Ø {SCALE[lvl].unit}</span></div>
+        <p className="mut">{lvl === 'oberstufe' ? 'Oberstufe (Punkte)' : 'Mittelstufe (Noten)'}. Aus {ok.length} von {d.subjects.length} Fächern. {avg != null && lvl === 'oberstufe' && <>Näherung Note: {f((17 - avg) / 3)} (keine offizielle Abiturprognose).</>}</p>
       </div>
       {creating
         ? <SubjectForm init={null} sems={d.sems} onSave={v => saveSubject(v)} onCancel={() => setCreating(false)} />
@@ -112,7 +117,8 @@ export default function Main({ user }: { user: User }) {
           <div className="big">{f(r.score)}</div>
           {r.reason && <span className="mut">{r.reason}</span>}{r.score != null && !r.complete && <span className="mut">vorläufig</span>}
         </button>))}</div>}
-      <div className="card" style={{ marginTop: '1rem' }}><h3>Verlauf des Punkteschnitts</h3><Chart pts={history(d, prof.missing_category_mode)} /></div>
+      <div className="card" style={{ marginTop: '1rem' }}><h3>Verlauf des Gesamtschnitts</h3><Chart level={lvl} series={[{ label: 'Gesamt', color: 'var(--ink)', pts: history(d, mode) }]} /></div>
+      <div className="card"><h3>Verlauf der einzelnen Fächer</h3><Chart legend level={lvl} series={d.subjects.map(x => ({ label: x.short_name || x.name, color: x.color, pts: subjHistory(d.cats.filter(c => c.subject_id === x.id), d.grades.filter(g => g.subject_id === x.id), mode) }))} /></div>
     </main>
   );
 }
@@ -120,6 +126,9 @@ export default function Main({ user }: { user: User }) {
 type Form = { id?: string; title: string; category_id: string; points: string; graded_on: string; note: string };
 function SubjectView({ s, cats, grades, run, setErr, back, half, mode, sems, save }: { s: Subject; cats: Cat[]; grades: Grade[]; run: (p: Res) => Promise<void>; setErr: (m: string) => void; back: () => void; half: boolean; mode: MissingMode; sems: Semester[]; save: (v: SubjectValues, id?: string) => Promise<string | null> }) {
   const r = scoreOf(cats, grades, mode);
+  const lvl: Level = s.level ?? 'oberstufe';
+  const sc = SCALE[lvl];
+  const hist = subjHistory(cats, grades, mode);
   const [form, setForm] = useState<Form | null>(null);
   const [editing, setEditing] = useState(false);
   const [moveFor, setMoveFor] = useState<Cat | null>(null);
@@ -134,7 +143,7 @@ function SubjectView({ s, cats, grades, run, setErr, back, half, mode, sems, sav
     const p = Number(form.points.replace(',', '.'));
     if (!form.title.trim()) return setErr('Bitte eine Bezeichnung eingeben.');
     if (!form.category_id) return setErr('Bitte eine Kategorie wählen.');
-    if (form.points === '' || !isValidPoints(p, half)) return setErr(half ? 'Punkte müssen zwischen 0 und 15 liegen, in Schritten von 0,5.' : 'Punkte müssen eine ganze Zahl von 0 bis 15 sein. Halbe Punkte aktivierst du in den Einstellungen.');
+    if (form.points === '' || !isValidValue(p, lvl, half)) return setErr(`Der Wert muss zwischen ${sc.min} und ${sc.max} liegen (${half ? 'in Schritten von 0,5' : 'ganze Zahl; Zwischenwerte aktivierst du in den Einstellungen'}).`);
     const row = { subject_id: s.id, category_id: form.category_id, title: form.title.trim(), points: p, graded_on: form.graded_on, note: form.note.trim() || null };
     setErr(''); setForm(null);
     run(form.id ? supabase.from('grades').update(row).eq('id', form.id) : supabase.from('grades').insert(row));
@@ -170,13 +179,27 @@ function SubjectView({ s, cats, grades, run, setErr, back, half, mode, sems, sav
           <button onClick={() => setEditing(!editing)}>Bearbeiten</button>
           <button className="d" onClick={() => { if (confirm(`Fach „${s.name}“ und alle Noten löschen?`)) { run(supabase.from('subjects').delete().eq('id', s.id)); back(); } }}>Löschen</button></span></div>
       {editing && <SubjectForm init={s} sems={sems} onSave={v => save(v, s.id)} onCancel={() => setEditing(false)} />}
-      <div className="card"><div className="big">{f(r.score)} <span className="mut" style={{ fontSize: '1rem' }}>Punkte</span></div>
+      <div className="card"><div className="big">{f(r.score)} <span className="mut" style={{ fontSize: '1rem' }}>{sc.unit}</span></div>
         {r.reason && <div className="alert">{r.reason}</div>}
         {r.score != null && !r.complete && <div className="alert">Vorläufig: Kategorien ohne Noten bleiben unberücksichtigt, die übrigen werden neu gewichtet.</div>}
         <details><summary>Rechenweg</summary><div className="tw"><table><thead><tr><th>Kategorie</th><th>Noten</th><th>Ø</th><th>Gewicht</th><th>Zählt</th></tr></thead><tbody>
           {r.steps.map(x => <tr key={x.category}><td>{x.category}</td><td>{x.count}</td><td>{f(x.average)}</td><td>{f(x.weight)} %</td><td>{x.used ? 'ja' : 'nein'}</td></tr>)}</tbody></table></div>
           <p className="mut">Fachpunktzahl = Σ (Ø × Gewicht) ÷ Σ berücksichtigte Gewichte.</p></details></div>
 
+      <div className="card"><h3>Verlauf in diesem Fach</h3><Chart level={lvl} series={[{ label: s.short_name || s.name, color: s.color, pts: hist }]} /></div>
+      <div className="card"><div className="row sp"><h3>Noten</h3>
+        <button className="pri" onClick={() => setForm({ title: '', category_id: cats[0]?.id ?? '', points: '', graded_on: new Date().toISOString().slice(0, 10), note: '' })}>Note eintragen</button></div>
+        {form && <form onSubmit={saveGrade} className="card">
+          <label htmlFor="gt">Bezeichnung</label><input id="gt" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} />
+          <label htmlFor="gc">Kategorie</label><select id="gc" value={form.category_id} onChange={e => setForm({ ...form, category_id: e.target.value })}>{cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+          <label htmlFor="gp">{sc.label}</label><input id="gp" type="number" min={sc.min} max={sc.max} step={half ? 0.5 : 1} value={form.points} onChange={e => setForm({ ...form, points: e.target.value })} />
+          <label htmlFor="gd">Datum</label><input id="gd" type="date" required value={form.graded_on} onChange={e => setForm({ ...form, graded_on: e.target.value })} />
+          <label htmlFor="gn">Bemerkung (optional)</label><input id="gn" value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} />
+          <p className="row"><button className="pri">Speichern</button><button type="button" onClick={() => setForm(null)}>Abbrechen</button></p></form>}
+        {grades.length ? <div className="tw"><table><thead><tr><th>Datum</th><th>Bezeichnung</th><th>Kategorie</th><th>{sc.unit}</th><th></th></tr></thead><tbody>{grades.map(g => (
+          <tr key={g.id}><td>{new Date(g.graded_on + 'T00:00:00').toLocaleDateString('de-DE')}</td><td>{g.title}{g.note && <div className="mut">{g.note}</div>}</td><td>{cn(g.category_id)}</td><td>{f(g.points)}</td>
+            <td className="row"><button onClick={() => setForm({ id: g.id, title: g.title, category_id: g.category_id, points: String(g.points), graded_on: g.graded_on, note: g.note ?? '' })}>Ändern</button>
+              <button className="d" onClick={() => confirm('Note löschen?') && run(supabase.from('grades').delete().eq('id', g.id))}>Löschen</button></td></tr>))}</tbody></table></div> : <p className="mut">Noch keine Noten.</p>}</div>
       <div className="card"><div className="row sp"><h3>Kategorien und Gewichtung</h3><button onClick={normalize}>Auf 100 % normalisieren</button></div>
         <div className={r.valid ? 'ok' : 'alert'} role="status">Summe: {f(r.weightSum)} % {r.valid ? '' : '– muss 100 % ergeben, sonst gibt es kein Ergebnis.'}</div>
         <div className="tw"><table><thead><tr><th>Name</th><th>Gewicht %</th><th>Aktiv</th><th></th></tr></thead><tbody>{cats.map(c => (
@@ -191,19 +214,6 @@ function SubjectView({ s, cats, grades, run, setErr, back, half, mode, sems, sav
         <form className="row" style={{ marginTop: '.6rem' }} onSubmit={e => { e.preventDefault(); const n = newCat.trim(); if (!n) return; if (cats.some(c => c.name.toLowerCase() === n.toLowerCase())) return setErr('Diese Kategorie gibt es schon.'); setNewCat(''); run(supabase.from('categories').insert({ subject_id: s.id, name: n, weight: 0 })); }}>
           <input style={{ flex: 1 }} aria-label="Neue Kategorie" placeholder="Neue Kategorie" value={newCat} onChange={e => setNewCat(e.target.value)} /><button>Hinzufügen</button></form></div>
 
-      <div className="card"><div className="row sp"><h3>Noten</h3>
-        <button className="pri" onClick={() => setForm({ title: '', category_id: cats[0]?.id ?? '', points: '', graded_on: new Date().toISOString().slice(0, 10), note: '' })}>Note eintragen</button></div>
-        {form && <form onSubmit={saveGrade} className="card">
-          <label htmlFor="gt">Bezeichnung</label><input id="gt" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} />
-          <label htmlFor="gc">Kategorie</label><select id="gc" value={form.category_id} onChange={e => setForm({ ...form, category_id: e.target.value })}>{cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
-          <label htmlFor="gp">Punkte (0 bis 15)</label><input id="gp" type="number" min={0} max={15} step={half ? 0.5 : 1} value={form.points} onChange={e => setForm({ ...form, points: e.target.value })} />
-          <label htmlFor="gd">Datum</label><input id="gd" type="date" required value={form.graded_on} onChange={e => setForm({ ...form, graded_on: e.target.value })} />
-          <label htmlFor="gn">Bemerkung (optional)</label><input id="gn" value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} />
-          <p className="row"><button className="pri">Speichern</button><button type="button" onClick={() => setForm(null)}>Abbrechen</button></p></form>}
-        {grades.length ? <div className="tw"><table><thead><tr><th>Datum</th><th>Bezeichnung</th><th>Kategorie</th><th>Punkte</th><th></th></tr></thead><tbody>{grades.map(g => (
-          <tr key={g.id}><td>{new Date(g.graded_on + 'T00:00:00').toLocaleDateString('de-DE')}</td><td>{g.title}{g.note && <div className="mut">{g.note}</div>}</td><td>{cn(g.category_id)}</td><td>{f(g.points)}</td>
-            <td className="row"><button onClick={() => setForm({ id: g.id, title: g.title, category_id: g.category_id, points: String(g.points), graded_on: g.graded_on, note: g.note ?? '' })}>Ändern</button>
-              <button className="d" onClick={() => confirm('Note löschen?') && run(supabase.from('grades').delete().eq('id', g.id))}>Löschen</button></td></tr>))}</tbody></table></div> : <p className="mut">Noch keine Noten.</p>}</div>
     </>
   );
 }
@@ -216,19 +226,32 @@ function history(d: Data, mode: MissingMode) {
   }).filter((x): x is { d: string; v: number } => x !== null);
 }
 const fdate = (s: string) => new Date(s + 'T00:00:00').toLocaleDateString('de-DE');
-function Chart({ pts }: { pts: { d: string; v: number }[] }) {
-  if (!pts.length) return <p className="mut">Der Verlauf erscheint, sobald Noten mit Datum vorliegen.</p>;
-  const W = 600, H = 190, L = 28;
-  const x = (i: number) => (pts.length > 1 ? L + (i * (W - L - 10)) / (pts.length - 1) : (W + L) / 2);
-  const y = (v: number) => H - 24 - (v / 15) * (H - 40);
+type Pt = { d: string; v: number };
+type Series = { label: string; color: string; pts: Pt[] };
+function subjHistory(cats: Cat[], grades: Grade[], mode: MissingMode): Pt[] {
+  const days = [...new Set(grades.map(g => g.graded_on))].sort();
+  return days.map(day => ({ d: day, v: scoreOf(cats, grades.filter(g => g.graded_on <= day), mode).score })).filter((x): x is Pt => x.v !== null);
+}
+function Chart({ series, level, legend }: { series: Series[]; level: Level; legend?: boolean }) {
+  const days = [...new Set(series.flatMap(s => s.pts.map(p => p.d)))].sort();
+  if (!days.length) return <p className="mut">Der Verlauf erscheint, sobald Noten mit Datum vorliegen.</p>;
+  const W = 600, H = 190, L = 28, sc = SCALE[level];
+  const x = (day: string) => (days.length > 1 ? L + (days.indexOf(day) * (W - L - 10)) / (days.length - 1) : (W + L) / 2);
+  const y = (v: number) => H - 24 - scalePos(v, level) * (H - 40);
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="Verlauf des Punkteschnitts über die Zeit">
-      {[0, 5, 10, 15].map(v => <g key={v}><line x1={L} x2={W} y1={y(v)} y2={y(v)} stroke="var(--line)" /><text x={2} y={y(v) + 4} fontSize="11" fill="var(--mut)">{v}</text></g>)}
-      <polyline fill="none" stroke="var(--ink)" strokeWidth="2" points={pts.map((p, i) => `${x(i)},${y(p.v)}`).join(' ')} />
-      {pts.map((p, i) => <circle key={p.d} cx={x(i)} cy={y(p.v)} r="3.5" fill="var(--red)"><title>{fdate(p.d)}: {f(p.v)} Punkte</title></circle>)}
-      <text x={L} y={H - 4} fontSize="11" fill="var(--mut)">{fdate(pts[0].d)}</text>
-      <text x={W - 10} y={H - 4} fontSize="11" fill="var(--mut)" textAnchor="end">{fdate(pts[pts.length - 1].d)}</text>
-    </svg>
+    <>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="Verlauf über die Zeit">
+        {sc.ticks.map(v => <g key={v}><line x1={L} x2={W} y1={y(v)} y2={y(v)} stroke="var(--line)" /><text x={2} y={y(v) + 4} fontSize="11" fill="var(--mut)">{v}</text></g>)}
+        {series.map((s, k) => s.pts.length > 0 && (
+          <g key={k}>
+            <polyline fill="none" stroke={s.color} strokeWidth="2" points={s.pts.map(p => `${x(p.d)},${y(p.v)}`).join(' ')} />
+            {s.pts.map(p => <circle key={p.d} cx={x(p.d)} cy={y(p.v)} r="3.5" fill={s.color}><title>{s.label}, {fdate(p.d)}: {f(p.v)} {sc.unit}</title></circle>)}
+          </g>))}
+        <text x={L} y={H - 4} fontSize="11" fill="var(--mut)">{fdate(days[0])}</text>
+        <text x={W - 10} y={H - 4} fontSize="11" fill="var(--mut)" textAnchor="end">{fdate(days[days.length - 1])}</text>
+      </svg>
+      {legend && <div className="row small">{series.filter(s => s.pts.length).map((s, k) => <span key={k}><span style={{ display: 'inline-block', width: 10, height: 10, background: s.color, borderRadius: 2, marginRight: 4 }} />{s.label}</span>)}</div>}
+    </>
   );
 }
 function download(name: string, text: string, type: string) {
@@ -236,28 +259,53 @@ function download(name: string, text: string, type: string) {
   a.href = URL.createObjectURL(new Blob([text], { type }));
   a.download = name; a.click(); URL.revokeObjectURL(a.href);
 }
-function Settings({ prof, save, d, back }: { prof: Profile; save: (p: Partial<Profile>) => void; d: Data; back: () => void }) {
+function Settings({ prof, save, all, back }: { prof: Profile; save: (p: Partial<Profile>) => void; all: Data; back: () => void }) {
+  const [dw, setDw] = useState(prof.default_weights);
+  const [dwMsg, setDwMsg] = useState('');
+  const sum = Math.round(dw.reduce((a, w) => a + (Number(w.weight) || 0), 0) * 100) / 100;
+  const noten = prof.school_level === 'mittelstufe';
   const csv = () => {
     const q = (v: unknown) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const rows = d.grades.map(g => [d.subjects.find(s => s.id === g.subject_id)?.name, d.cats.find(c => c.id === g.category_id)?.name, g.title, g.points, g.graded_on, g.note].map(q).join(';'));
-    return '\uFEFF' + ['Fach;Kategorie;Bezeichnung;Punkte;Datum;Bemerkung', ...rows].join('\n');
+    const rows = all.grades.map(g => [all.subjects.find(s => s.id === g.subject_id)?.name, all.cats.find(c => c.id === g.category_id)?.name, g.title, g.points, g.graded_on, g.note].map(q).join(';'));
+    return '\uFEFF' + ['Fach;Kategorie;Bezeichnung;Wert;Datum;Bemerkung', ...rows].join('\n');
   };
+  function saveWeights() {
+    const names = dw.map(w => w.name.trim());
+    if (names.some(n => !n)) return setDwMsg('Jede Kategorie braucht einen Namen.');
+    if (new Set(names.map(n => n.toLowerCase())).size !== names.length) return setDwMsg('Kategorienamen dürfen nicht doppelt vorkommen.');
+    save({ default_weights: dw.map((w, i) => ({ name: names[i], weight: Math.min(100, Math.max(0, Number(w.weight) || 0)) })) });
+    setDwMsg(sum === 100 ? 'Gespeichert.' : 'Gespeichert. Die Summe ist nicht 100 %, neue Fächer zeigen deshalb eine Warnung.');
+  }
   return (
     <>
       <p><button onClick={back}>← Zurück</button></p>
       <h2>Einstellungen</h2>
       <div className="card">
+        <label htmlFor="lv">Schulstufe</label>
+        <select id="lv" value={prof.school_level} onChange={e => save({ school_level: e.target.value as Level })}>
+          <option value="oberstufe">Oberstufe (MSS, Punkte 0 bis 15)</option><option value="mittelstufe">Mittelstufe (Noten 1 bis 6)</option></select>
+        <p className="mut small">Du siehst nur die Fächer der gewählten Stufe. Die der anderen Stufe bleiben gespeichert. Neue Fächer gehören zur gewählten Stufe.</p>
         <label htmlFor="th">Farbschema</label>
         <select id="th" value={prof.theme} onChange={e => save({ theme: e.target.value as Profile['theme'] })}>
           <option value="system">Wie Gerät</option><option value="light">Hell</option><option value="dark">Dunkel</option></select>
-        <label><input type="checkbox" style={{ width: 'auto' }} checked={prof.half_points} onChange={e => save({ half_points: e.target.checked })} /> Halbe Punkte erlauben</label>
+        <label><input type="checkbox" style={{ width: 'auto' }} checked={prof.half_points} onChange={e => save({ half_points: e.target.checked })} /> {noten ? 'Halbe Noten erlauben' : 'Halbe Punkte erlauben'}</label>
         <label htmlFor="mm">Kategorien ohne Noten</label>
         <select id="mm" value={prof.missing_category_mode} onChange={e => save({ missing_category_mode: e.target.value as Profile['missing_category_mode'] })}>
           <option value="renormalize">Ignorieren und übrige neu gewichten (vorläufig)</option>
           <option value="strict">Streng: kein Ergebnis, bis alle Kategorien bewertet sind</option></select>
       </div>
+      <div className="card"><h3>Standard-Gewichtung für neue Fächer</h3>
+        <p className="mut small">Diese Kategorien werden beim Anlegen eines Fachs automatisch erstellt. Bestehende Fächer ändern sich nicht.</p>
+        <div className="tw"><table><thead><tr><th>Kategorie</th><th>Gewicht %</th><th></th></tr></thead><tbody>{dw.map((w, i) => (
+          <tr key={i}>
+            <td><input aria-label="Kategoriename" value={w.name} onChange={e => setDw(dw.map((x, k) => (k === i ? { ...x, name: e.target.value } : x)))} /></td>
+            <td><input aria-label="Gewicht in Prozent" type="number" min={0} max={100} step={0.5} value={w.weight} onChange={e => setDw(dw.map((x, k) => (k === i ? { ...x, weight: Number(e.target.value) } : x)))} /></td>
+            <td><button className="d" onClick={() => setDw(dw.filter((_, k) => k !== i))}>Entfernen</button></td></tr>))}</tbody></table></div>
+        <div className={sum === 100 ? 'ok' : 'alert'} role="status">Summe: {sum} %</div>
+        {dwMsg && <p className="mut small" role="status">{dwMsg}</p>}
+        <p className="row"><button onClick={() => setDw([...dw, { name: '', weight: 0 }])}>Kategorie hinzufügen</button><button className="pri" onClick={saveWeights}>Speichern</button></p></div>
       <div className="card"><h3>Daten exportieren</h3>
-        <div className="row"><button onClick={() => download('mss-noten.json', JSON.stringify(d, null, 1), 'application/json')}>JSON</button>
+        <div className="row"><button onClick={() => download('mss-noten.json', JSON.stringify(all, null, 1), 'application/json')}>JSON</button>
           <button onClick={() => download('mss-noten.csv', csv(), 'text/csv')}>CSV</button></div></div>
     </>
   );
