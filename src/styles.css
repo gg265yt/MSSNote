@@ -12,3 +12,4 @@ table{border-collapse:collapse;width:100%}td,th{padding:.35rem;border-bottom:1px
 .alert{background:var(--redbg);color:var(--red);padding:.6rem;border-radius:8px;margin:.5rem 0}.ok{background:var(--okbg);color:var(--ok);padding:.6rem;border-radius:8px;margin:.5rem 0}
 .tile{cursor:pointer;text-align:left;width:100%}.center{text-align:center;margin-top:3rem}.tw{overflow-x:auto}
 :focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.small{font-size:.85rem}input[type=color]{height:2.4rem;padding:.1rem}

@@ -2,11 +2,13 @@ import { useCallback, useEffect, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
 import { isValidPoints, normalizeWeights, subjectScore, type MissingMode } from './lib/grades';
-import type { Cat, Grade, Profile, Subject } from './types';
+import type { Cat, Grade, Profile, Semester, Subject } from './types';
 
 const f = (n: number | null) => (n == null ? '–' : n.toLocaleString('de-DE', { maximumFractionDigits: 2 }));
 const DEFAULT_CATS: [string, number][] = [['Klausuren', 50], ['Mündliche Mitarbeit', 30], ['Tests', 20]];
-type Data = { subjects: Subject[]; cats: Cat[]; grades: Grade[] };
+type Data = { sems: Semester[]; subjects: Subject[]; cats: Cat[]; grades: Grade[] };
+type SubjectValues = { name: string; short_name: string; kind: 'grundfach' | 'leistungsfach'; color: string; semester: string };
+const semOf = (sems: Semester[], s: Subject) => sems.find(x => x.id === s.semester_id)?.label;
 type Res = PromiseLike<{ error: { message: string } | null }>;
 
 const scoreOf = (cats: Cat[], grades: Grade[], mode: MissingMode) =>
@@ -16,7 +18,8 @@ export default function Main({ user }: { user: User }) {
   const [d, setD] = useState<Data | null>(null);
   const [err, setErr] = useState('');
   const [sel, setSel] = useState<string | null>(null);
-  const [name, setName] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [sorting, setSorting] = useState(false);
   const [prof, setProf] = useState<Profile>({ half_points: false, theme: 'system', missing_category_mode: 'renormalize' });
   const [view, setView] = useState<'home' | 'settings'>('home');
   useEffect(() => {
@@ -25,29 +28,49 @@ export default function Main({ user }: { user: User }) {
   }, [prof.theme]);
 
   const reload = useCallback(async () => {
-    const [s, c, g, pr] = await Promise.all([
+    const [s, c, g, pr, se] = await Promise.all([
       supabase.from('subjects').select('*').order('sort_order').order('created_at'),
       supabase.from('categories').select('*').order('created_at'),
       supabase.from('grades').select('*').order('graded_on', { ascending: false }),
       supabase.from('profiles').select('*').eq('id', user.id).maybeSingle(),
+      supabase.from('semesters').select('*').order('sort_order'),
     ]);
-    const e = s.error || c.error || g.error;
+    const e = s.error || c.error || g.error || se.error;
     if (e) { setErr('Daten konnten nicht geladen werden: ' + e.message + ' (Wurde die SQL-Datei ausgeführt?)'); return; }
     setErr('');
     if (pr.data) setProf({ half_points: !!pr.data.half_points, theme: pr.data.theme, missing_category_mode: pr.data.missing_category_mode });
-    setD({ subjects: s.data as Subject[], cats: (c.data as Cat[]).map(x => ({ ...x, weight: Number(x.weight) })), grades: (g.data as Grade[]).map(x => ({ ...x, points: Number(x.points) })) });
+    setD({ sems: se.data as Semester[], subjects: s.data as Subject[], cats: (c.data as Cat[]).map(x => ({ ...x, weight: Number(x.weight) })), grades: (g.data as Grade[]).map(x => ({ ...x, points: Number(x.points) })) });
   }, [user.id]);
   useEffect(() => { reload(); }, [reload]);
   const savePref = (patch: Partial<Profile>) => { setProf({ ...prof, ...patch }); run(supabase.from('profiles').upsert({ id: user.id, ...patch })); };
   const run = async (p: Res) => { const { error } = await p; await reload(); if (error) setErr(error.message); };
 
-  async function addSubject(e: React.FormEvent) {
-    e.preventDefault();
-    if (!d || !name.trim()) return;
-    const { data, error } = await supabase.from('subjects').insert({ name: name.trim(), sort_order: d.subjects.length }).select().single();
-    if (error || !data) { setErr(error?.message ?? 'Fach konnte nicht angelegt werden.'); return; }
-    setName('');
+  async function saveSubject(v: SubjectValues, id?: string): Promise<string | null> {
+    if (!d) return null;
+    let semester_id: string | null = null;
+    const label = v.semester.trim();
+    if (label) {
+      const ex = d.sems.find(x => x.label.toLowerCase() === label.toLowerCase());
+      if (ex) semester_id = ex.id;
+      else {
+        const r = await supabase.from('semesters').insert({ label, sort_order: d.sems.length }).select().single();
+        if (r.error || !r.data) return r.error?.message ?? 'Halbjahr konnte nicht angelegt werden.';
+        semester_id = r.data.id;
+      }
+    }
+    const row = { name: v.name.trim(), short_name: v.short_name.trim() || null, kind: v.kind, color: v.color, semester_id };
+    if (id) { await run(supabase.from('subjects').update(row).eq('id', id)); return null; }
+    const { data, error } = await supabase.from('subjects').insert({ ...row, sort_order: d.subjects.length }).select().single();
+    if (error || !data) return error?.message ?? 'Fach konnte nicht angelegt werden.';
     await run(supabase.from('categories').insert(DEFAULT_CATS.map(([n, w]) => ({ subject_id: data.id, name: n, weight: w }))));
+    return null;
+  }
+  async function move(i: number, dir: number) {
+    if (!d || i + dir < 0 || i + dir >= d.subjects.length) return;
+    const order = [...d.subjects];
+    [order[i], order[i + dir]] = [order[i + dir], order[i]];
+    const rs = await Promise.all(order.map((s, k) => supabase.from('subjects').update({ sort_order: k }).eq('id', s.id)));
+    await run(Promise.resolve({ error: rs.find(x => x.error)?.error ?? null }));
   }
 
   const header = (
@@ -58,7 +81,7 @@ export default function Main({ user }: { user: User }) {
   const subject = d.subjects.find(s => s.id === sel);
   if (subject)
     return <main>{header}{err && <div className="alert" role="alert">{err}</div>}
-      <SubjectView s={subject} cats={d.cats.filter(c => c.subject_id === subject.id)} grades={d.grades.filter(g => g.subject_id === subject.id)} run={run} setErr={setErr} back={() => setSel(null)} half={prof.half_points} mode={prof.missing_category_mode} /></main>;
+      <SubjectView s={subject} cats={d.cats.filter(c => c.subject_id === subject.id)} grades={d.grades.filter(g => g.subject_id === subject.id)} run={run} setErr={setErr} back={() => setSel(null)} half={prof.half_points} mode={prof.missing_category_mode} sems={d.sems} save={saveSubject} /></main>;
 
   if (view === 'settings') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Settings prof={prof} save={savePref} d={d} back={() => setView('home')} /></main>;
   const results = d.subjects.map(s => ({ s, r: scoreOf(d.cats.filter(c => c.subject_id === s.id), d.grades.filter(g => g.subject_id === s.id), prof.missing_category_mode) }));
@@ -70,25 +93,35 @@ export default function Main({ user }: { user: User }) {
         <div className="big">{f(avg)} <span className="mut" style={{ fontSize: '1rem' }}>Ø Punkte</span></div>
         <p className="mut">Aus {ok.length} von {d.subjects.length} Fächern. {avg != null && <>Näherung Note: {f((17 - avg) / 3)} (keine offizielle Abiturprognose).</>}</p>
       </div>
-      <form className="row" onSubmit={addSubject} style={{ marginBottom: '1rem' }}>
-        <input style={{ flex: 1 }} aria-label="Name des neuen Fachs" placeholder="Neues Fach, z. B. Mathematik" value={name} onChange={e => setName(e.target.value)} />
-        <button className="pri">Fach anlegen</button>
-      </form>
+      {creating
+        ? <SubjectForm init={null} sems={d.sems} onSave={v => saveSubject(v)} onCancel={() => setCreating(false)} />
+        : <div className="row sp" style={{ marginBottom: '1rem' }}><h2 style={{ margin: 0 }}>Fächer</h2>
+          <span className="row">{d.subjects.length > 1 && <button onClick={() => setSorting(!sorting)}>{sorting ? 'Fertig' : 'Reihenfolge ändern'}</button>}
+            <button className="pri" onClick={() => setCreating(true)}>Fach anlegen</button></span></div>}
       {!d.subjects.length && <div className="card"><p>Noch keine Fächer. Lege oben dein erstes Fach an.</p></div>}
-      <div className="grid">{results.map(({ s, r }) => (
+      {sorting ? <div className="card">{d.subjects.map((s, i) => (
+        <div key={s.id} className="row sp" style={{ borderLeft: `6px solid ${s.color}`, padding: '.3rem .6rem' }}>
+          <span><b>{s.short_name || s.name}</b>{s.short_name && <span className="mut small"> {s.name}</span>}</span>
+          <span className="row"><button aria-label={`${s.name} nach oben`} disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
+            <button aria-label={`${s.name} nach unten`} disabled={i === d.subjects.length - 1} onClick={() => move(i, 1)}>↓</button></span></div>))}</div>
+      : <div className="grid">{results.map(({ s, r }) => (
         <button key={s.id} className="card tile" style={{ borderLeft: `6px solid ${s.color}` }} onClick={() => setSel(s.id)}>
-          <b>{s.name}</b><div className="big">{f(r.score)}</div>
+          <b style={{ fontSize: s.short_name ? '1.3rem' : '1.05rem' }}>{s.short_name || s.name}</b>
+          {s.short_name && <div className="mut small">{s.name}</div>}
+          <div className="mut small">{s.kind === 'leistungsfach' ? 'Leistungsfach' : 'Grundfach'}{semOf(d.sems, s) ? ' · ' + semOf(d.sems, s) : ''}</div>
+          <div className="big">{f(r.score)}</div>
           {r.reason && <span className="mut">{r.reason}</span>}{r.score != null && !r.complete && <span className="mut">vorläufig</span>}
-        </button>))}</div>
+        </button>))}</div>}
       <div className="card" style={{ marginTop: '1rem' }}><h3>Verlauf des Punkteschnitts</h3><Chart pts={history(d, prof.missing_category_mode)} /></div>
     </main>
   );
 }
 
 type Form = { id?: string; title: string; category_id: string; points: string; graded_on: string; note: string };
-function SubjectView({ s, cats, grades, run, setErr, back, half, mode }: { s: Subject; cats: Cat[]; grades: Grade[]; run: (p: Res) => Promise<void>; setErr: (m: string) => void; back: () => void; half: boolean; mode: MissingMode }) {
+function SubjectView({ s, cats, grades, run, setErr, back, half, mode, sems, save }: { s: Subject; cats: Cat[]; grades: Grade[]; run: (p: Res) => Promise<void>; setErr: (m: string) => void; back: () => void; half: boolean; mode: MissingMode; sems: Semester[]; save: (v: SubjectValues, id?: string) => Promise<string | null> }) {
   const r = scoreOf(cats, grades, mode);
   const [form, setForm] = useState<Form | null>(null);
+  const [editing, setEditing] = useState(false);
   const [moveFor, setMoveFor] = useState<Cat | null>(null);
   const [moveTo, setMoveTo] = useState('');
   const [newCat, setNewCat] = useState('');
@@ -130,10 +163,13 @@ function SubjectView({ s, cats, grades, run, setErr, back, half, mode }: { s: Su
   return (
     <>
       <p><button onClick={back}>← Fächer</button></p>
-      <div className="row sp"><h2>{s.name}</h2>
+      <div className="row sp" style={{ borderLeft: `6px solid ${s.color}`, paddingLeft: '.7rem' }}>
+        <div><h2 style={{ margin: 0 }}>{s.short_name || s.name}</h2>{s.short_name && <div className="mut">{s.name}</div>}
+          <div className="mut small">{s.kind === 'leistungsfach' ? 'Leistungsfach' : 'Grundfach'}{semOf(sems, s) ? ' · Halbjahr ' + semOf(sems, s) : ''}</div></div>
         <span className="row">
-          <button onClick={() => { const n = prompt('Neuer Name', s.name); if (n?.trim()) run(supabase.from('subjects').update({ name: n.trim() }).eq('id', s.id)); }}>Umbenennen</button>
+          <button onClick={() => setEditing(!editing)}>Bearbeiten</button>
           <button className="d" onClick={() => { if (confirm(`Fach „${s.name}“ und alle Noten löschen?`)) { run(supabase.from('subjects').delete().eq('id', s.id)); back(); } }}>Löschen</button></span></div>
+      {editing && <SubjectForm init={s} sems={sems} onSave={v => save(v, s.id)} onCancel={() => setEditing(false)} />}
       <div className="card"><div className="big">{f(r.score)} <span className="mut" style={{ fontSize: '1rem' }}>Punkte</span></div>
         {r.reason && <div className="alert">{r.reason}</div>}
         {r.score != null && !r.complete && <div className="alert">Vorläufig: Kategorien ohne Noten bleiben unberücksichtigt, die übrigen werden neu gewichtet.</div>}
@@ -224,5 +260,38 @@ function Settings({ prof, save, d, back }: { prof: Profile; save: (p: Partial<Pr
         <div className="row"><button onClick={() => download('mss-noten.json', JSON.stringify(d, null, 1), 'application/json')}>JSON</button>
           <button onClick={() => download('mss-noten.csv', csv(), 'text/csv')}>CSV</button></div></div>
     </>
+  );
+}
+
+function SubjectForm({ init, sems, onSave, onCancel }: { init: Subject | null; sems: Semester[]; onSave: (v: SubjectValues) => Promise<string | null>; onCancel: () => void }) {
+  const [v, setV] = useState<SubjectValues>({ name: init?.name ?? '', short_name: init?.short_name ?? '', kind: init?.kind ?? 'grundfach', color: init?.color ?? '#3b6fd4', semester: init ? semOf(sems, init) ?? '' : '' });
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!v.name.trim()) return setMsg('Bitte einen Fachnamen eingeben.');
+    setBusy(true);
+    const r = await onSave(v);
+    setBusy(false);
+    if (r) setMsg(r); else onCancel();
+  }
+  return (
+    <form className="card" onSubmit={submit}>
+      <h3>{init ? 'Fach bearbeiten' : 'Neues Fach'}</h3>
+      <label htmlFor="sn">Fachname</label>
+      <input id="sn" required maxLength={80} value={v.name} onChange={e => setV({ ...v, name: e.target.value })} />
+      <label htmlFor="sk">Kürzel (optional, höchstens 10 Zeichen)</label>
+      <input id="sk" maxLength={10} value={v.short_name} onChange={e => setV({ ...v, short_name: e.target.value })} />
+      <label htmlFor="sf">Fachart</label>
+      <select id="sf" value={v.kind} onChange={e => setV({ ...v, kind: e.target.value as SubjectValues['kind'] })}>
+        <option value="grundfach">Grundfach</option><option value="leistungsfach">Leistungsfach</option></select>
+      <label htmlFor="sh">Halbjahr (z. B. 12/1, optional)</label>
+      <input id="sh" list="sems" maxLength={20} value={v.semester} onChange={e => setV({ ...v, semester: e.target.value })} />
+      <datalist id="sems">{sems.map(x => <option key={x.id} value={x.label} />)}</datalist>
+      <label htmlFor="sc">Farbe</label>
+      <input id="sc" type="color" value={v.color} onChange={e => setV({ ...v, color: e.target.value })} />
+      {msg && <div className="alert" role="alert">{msg}</div>}
+      <p className="row"><button className="pri" disabled={busy}>Speichern</button><button type="button" onClick={onCancel}>Abbrechen</button></p>
+    </form>
   );
 }
