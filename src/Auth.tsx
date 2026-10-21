@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { supabase } from './supabase';
 
-const de = (m: string) =>
+export const de = (m: string) =>
+  /different from the old|same password/i.test(m) ? 'Das neue Passwort muss sich vom alten unterscheiden.' :
   /Invalid login/i.test(m) ? 'E-Mail oder Passwort stimmt nicht.' :
   /already registered/i.test(m) ? 'Diese E-Mail ist schon registriert.' :
   /not confirmed/i.test(m) ? 'Bitte bestätige zuerst deine E-Mail-Adresse.' :
@@ -14,6 +15,7 @@ export function Auth() {
   const [mode, setMode] = useState<'login' | 'register' | 'reset'>('login');
   const [email, setEmail] = useState('');
   const [pw, setPw] = useState('');
+  const [username, setUsername] = useState('');
   const [msg, setMsg] = useState<{ ok: boolean; t: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -25,7 +27,7 @@ export function Auth() {
         const { error } = await supabase.auth.signInWithPassword({ email, password: pw });
         if (error) setMsg({ ok: false, t: de(error.message) });
       } else if (mode === 'register') {
-        const { data, error } = await supabase.auth.signUp({ email, password: pw, options: { emailRedirectTo: here() } });
+        const { data, error } = await supabase.auth.signUp({ email, password: pw, options: { emailRedirectTo: here(), ...(username.trim() ? { data: { display_name: username.trim() } } : {}) } });
         if (error) setMsg({ ok: false, t: de(error.message) });
         else if (!data.session) setMsg({ ok: true, t: 'Fast fertig: Wir haben dir eine E-Mail zur Bestätigung geschickt.' });
       } else {
@@ -41,6 +43,10 @@ export function Auth() {
         <h2>{mode === 'login' ? 'Anmelden' : mode === 'register' ? 'Registrieren' : 'Passwort zurücksetzen'}</h2>
         <label htmlFor="em">E-Mail</label>
         <input id="em" type="email" required autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} />
+        {mode === 'register' && <>
+          <label htmlFor="un">Benutzername (optional)</label>
+          <input id="un" maxLength={40} autoComplete="nickname" value={username} onChange={e => setUsername(e.target.value)} />
+        </>}
         {mode !== 'reset' && <>
           <label htmlFor="pw">Passwort</label>
           <input id="pw" type="password" required minLength={6} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={pw} onChange={e => setPw(e.target.value)} />

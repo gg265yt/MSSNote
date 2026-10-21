@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
+import { de } from './Auth';
 import { SCALE, isValidValue, normalizeWeights, scalePos, subjectScore, type Level, type MissingMode } from './lib/grades';
 import type { Cat, Grade, Period, Profile, Semester, Slot, Subject } from './types';
 
@@ -19,9 +20,10 @@ export default function Main({ user }: { user: User }) {
   const [d0, setD0] = useState<Data | null>(null);
   const [err, setErr] = useState('');
   const [sel, setSel] = useState<string | null>(null);
+  const synced = useRef(false);
   const [creating, setCreating] = useState(false);
   const [sorting, setSorting] = useState(false);
-  const [prof, setProf] = useState<Profile>({ half_points: false, theme: 'system', missing_category_mode: 'renormalize', school_level: 'oberstufe', default_weights: DEFAULT_WEIGHTS });
+  const [prof, setProf] = useState<Profile>({ display_name: null, half_points: false, theme: 'system', missing_category_mode: 'renormalize', school_level: 'oberstufe', default_weights: DEFAULT_WEIGHTS });
   const [view, setView] = useState<'home' | 'settings' | 'timetable'>('home');
   const lvl = prof.school_level;
   const mode = prof.missing_category_mode;
@@ -44,7 +46,15 @@ export default function Main({ user }: { user: User }) {
     const e = s.error || c.error || g.error || se.error;
     if (e) { setErr('Daten konnten nicht geladen werden: ' + e.message + ' (Wurde die SQL-Datei ausgeführt?)'); return; }
     setErr('');
-    if (pr.data) setProf({ half_points: !!pr.data.half_points, theme: pr.data.theme, missing_category_mode: pr.data.missing_category_mode, school_level: pr.data.school_level === 'mittelstufe' ? 'mittelstufe' : 'oberstufe', default_weights: Array.isArray(pr.data.default_weights) ? pr.data.default_weights : DEFAULT_WEIGHTS });
+    if (pr.data) setProf({ display_name: pr.data.display_name ?? null, half_points: !!pr.data.half_points, theme: pr.data.theme, missing_category_mode: pr.data.missing_category_mode, school_level: pr.data.school_level === 'mittelstufe' ? 'mittelstufe' : 'oberstufe', default_weights: Array.isArray(pr.data.default_weights) ? pr.data.default_weights : DEFAULT_WEIGHTS });
+    // Benutzername aus der Registrierung einmalig ins Profil übernehmen
+    const meta = String(user.user_metadata?.display_name ?? '').trim();
+    if (!synced.current && !pr.data?.display_name && meta) {
+      synced.current = true;
+      await supabase.from('profiles').upsert({ id: user.id, display_name: meta });
+      setProf(p => ({ ...p, display_name: meta }));
+    }
+    synced.current = true;
     setD0({ periods: pe.error ? [] : (pe.data as Period[]), slots: sl.error ? [] : (sl.data as Slot[]), ttMissing: !!(pe.error || sl.error), sems: se.data as Semester[], subjects: s.data as Subject[], cats: (c.data as Cat[]).map(x => ({ ...x, weight: Number(x.weight) })), grades: (g.data as Grade[]).map(x => ({ ...x, points: Number(x.points) })) });
   }, [user.id]);
   useEffect(() => { reload(); }, [reload]);
@@ -82,7 +92,7 @@ export default function Main({ user }: { user: User }) {
 
   const header = (
     <div className="row sp"><h1>MSS Grade Tracker</h1>
-      <span className="row"><span className="mut">{user.email}</span><button onClick={() => { setSel(null); setView('timetable'); }}>Stundenplan</button><button onClick={() => { setSel(null); setView('settings'); }}>Einstellungen</button><button onClick={() => supabase.auth.signOut()}>Abmelden</button></span></div>
+      <span className="row"><span className="mut">{prof.display_name || user.email}</span><button onClick={() => { setSel(null); setView('timetable'); }}>Stundenplan</button><button onClick={() => { setSel(null); setView('settings'); }}>Einstellungen</button><button onClick={() => supabase.auth.signOut()}>Abmelden</button></span></div>
   );
   if (!d) return <main>{header}{err ? <div className="alert" role="alert">{err}</div> : <p>Lädt …</p>}</main>;
   const subject = d.subjects.find(s => s.id === sel);
@@ -91,7 +101,7 @@ export default function Main({ user }: { user: User }) {
       <SubjectView s={subject} cats={d.cats.filter(c => c.subject_id === subject.id)} grades={d.grades.filter(g => g.subject_id === subject.id)} run={run} setErr={setErr} back={() => setSel(null)} half={prof.half_points} mode={prof.missing_category_mode} sems={d.sems} save={saveSubject} /></main>;
 
   if (view === 'timetable') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Timetable d={d} subjects={(d0 as Data).subjects} run={run} setErr={setErr} back={() => setView('home')} /></main>;
-  if (view === 'settings') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Settings prof={prof} save={savePref} all={d0 as Data} back={() => setView('home')} /></main>;
+  if (view === 'settings') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Settings email={user.email ?? ''} prof={prof} save={savePref} all={d0 as Data} back={() => setView('home')} /></main>;
   const results = d.subjects.map(s => ({ s, r: scoreOf(d.cats.filter(c => c.subject_id === s.id), d.grades.filter(g => g.subject_id === s.id), prof.missing_category_mode) }));
   const ok = results.filter(x => x.r.score !== null);
   const avg = ok.length ? ok.reduce((a, x) => a + (x.r.score as number), 0) / ok.length : null;
@@ -262,9 +272,18 @@ function download(name: string, text: string, type: string) {
   a.href = URL.createObjectURL(new Blob([text], { type }));
   a.download = name; a.click(); URL.revokeObjectURL(a.href);
 }
-function Settings({ prof, save, all, back }: { prof: Profile; save: (p: Partial<Profile>) => void; all: Data; back: () => void }) {
+function Settings({ email, prof, save, all, back }: { email: string; prof: Profile; save: (p: Partial<Profile>) => void; all: Data; back: () => void }) {
   const [dw, setDw] = useState(prof.default_weights);
   const [dwMsg, setDwMsg] = useState('');
+  const [uname, setUname] = useState(prof.display_name ?? '');
+  const [unameMsg, setUnameMsg] = useState('');
+  async function saveName() {
+    const v = uname.trim();
+    if (v.length > 40) return setUnameMsg('Der Benutzername darf höchstens 40 Zeichen haben.');
+    save({ display_name: v || null });
+    await supabase.auth.updateUser({ data: { display_name: v } });
+    setUnameMsg(v ? 'Benutzername gespeichert.' : 'Benutzername entfernt, es wird wieder deine E-Mail angezeigt.');
+  }
   const sum = Math.round(dw.reduce((a, w) => a + (Number(w.weight) || 0), 0) * 100) / 100;
   const noten = prof.school_level === 'mittelstufe';
   const csv = () => {
@@ -283,6 +302,13 @@ function Settings({ prof, save, all, back }: { prof: Profile; save: (p: Partial<
     <>
       <p><button onClick={back}>← Zurück</button></p>
       <h2>Einstellungen</h2>
+      <div className="card"><h3>Profil</h3>
+        <label htmlFor="un">Benutzername</label>
+        <input id="un" maxLength={40} value={uname} placeholder={email} onChange={e => setUname(e.target.value)} />
+        <p className="mut small">Wird oben statt deiner E-Mail angezeigt. Zum Anmelden brauchst du weiterhin die E-Mail-Adresse.</p>
+        {unameMsg && <p className="small" role="status">{unameMsg}</p>}
+        <p><button className="pri" onClick={saveName}>Benutzernamen speichern</button></p></div>
+      <PasswordForm email={email} />
       <div className="card">
         <label htmlFor="lv">Schulstufe</label>
         <select id="lv" value={prof.school_level} onChange={e => save({ school_level: e.target.value as Level })}>
@@ -413,5 +439,43 @@ function Timetable({ d, subjects, run, setErr, back }: { d: Data; subjects: Subj
             </tr>))}
         </tbody></table></div>)}
     </>
+  );
+}
+
+function PasswordForm({ email }: { email: string }) {
+  const [cur, setCur] = useState('');
+  const [pw, setPw] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [msg, setMsg] = useState<{ ok: boolean; t: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+    if (pw.length < 6) return setMsg({ ok: false, t: 'Das neue Passwort braucht mindestens 6 Zeichen.' });
+    if (pw !== pw2) return setMsg({ ok: false, t: 'Die beiden neuen Passwörter stimmen nicht überein.' });
+    setBusy(true);
+    const chk = await supabase.auth.signInWithPassword({ email, password: cur });
+    if (chk.error) {
+      setBusy(false);
+      return setMsg({ ok: false, t: /Invalid login/i.test(chk.error.message) ? 'Das aktuelle Passwort stimmt nicht.' : de(chk.error.message) });
+    }
+    const { error } = await supabase.auth.updateUser({ password: pw });
+    setBusy(false);
+    if (error) return setMsg({ ok: false, t: de(error.message) });
+    setCur(''); setPw(''); setPw2('');
+    setMsg({ ok: true, t: 'Passwort geändert.' });
+  }
+  return (
+    <form className="card" onSubmit={submit}>
+      <h3>Passwort ändern</h3>
+      <label htmlFor="pc">Aktuelles Passwort</label>
+      <input id="pc" type="password" required autoComplete="current-password" value={cur} onChange={e => setCur(e.target.value)} />
+      <label htmlFor="pn">Neues Passwort (mindestens 6 Zeichen)</label>
+      <input id="pn" type="password" required minLength={6} autoComplete="new-password" value={pw} onChange={e => setPw(e.target.value)} />
+      <label htmlFor="pr">Neues Passwort wiederholen</label>
+      <input id="pr" type="password" required minLength={6} autoComplete="new-password" value={pw2} onChange={e => setPw2(e.target.value)} />
+      {msg && <div className={msg.ok ? 'ok' : 'alert'} role="alert">{msg.t}</div>}
+      <p><button className="pri" disabled={busy}>Passwort ändern</button></p>
+    </form>
   );
 }
