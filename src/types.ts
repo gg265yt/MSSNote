@@ -4,3 +4,5 @@ export type Subject = { id: string; level?: Level; name: string; short_name: str
 export type Cat = { id: string; subject_id: string; name: string; weight: number; active: boolean };
 export type Grade = { id: string; subject_id: string; category_id: string; title: string; points: number; graded_on: string; note: string | null };
 export type Profile = { half_points: boolean; theme: 'light' | 'dark' | 'system'; missing_category_mode: 'renormalize' | 'strict'; school_level: Level; default_weights: { name: string; weight: number }[] };
+export type Period = { id: string; nr: number; start_time: string; end_time: string };
+export type Slot = { id: string; weekday: number; period_id: string; subject_id: string };

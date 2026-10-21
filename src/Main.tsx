@@ -2,11 +2,11 @@ import { useCallback, useEffect, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
 import { SCALE, isValidValue, normalizeWeights, scalePos, subjectScore, type Level, type MissingMode } from './lib/grades';
-import type { Cat, Grade, Profile, Semester, Subject } from './types';
+import type { Cat, Grade, Period, Profile, Semester, Slot, Subject } from './types';
 
 const f = (n: number | null) => (n == null ? '–' : n.toLocaleString('de-DE', { maximumFractionDigits: 2 }));
 const DEFAULT_WEIGHTS = [{ name: 'Klausuren', weight: 50 }, { name: 'Mündliche Mitarbeit', weight: 30 }, { name: 'Tests', weight: 20 }];
-type Data = { sems: Semester[]; subjects: Subject[]; cats: Cat[]; grades: Grade[] };
+type Data = { sems: Semester[]; subjects: Subject[]; cats: Cat[]; grades: Grade[]; periods: Period[]; slots: Slot[]; ttMissing: boolean };
 type SubjectValues = { name: string; short_name: string; kind: 'grundfach' | 'leistungsfach'; color: string; semester: string };
 const lv = (s: Subject): Level => s.level ?? 'oberstufe';
 const semOf = (sems: Semester[], s: Subject) => sems.find(x => x.id === s.semester_id)?.label;
@@ -22,7 +22,7 @@ export default function Main({ user }: { user: User }) {
   const [creating, setCreating] = useState(false);
   const [sorting, setSorting] = useState(false);
   const [prof, setProf] = useState<Profile>({ half_points: false, theme: 'system', missing_category_mode: 'renormalize', school_level: 'oberstufe', default_weights: DEFAULT_WEIGHTS });
-  const [view, setView] = useState<'home' | 'settings'>('home');
+  const [view, setView] = useState<'home' | 'settings' | 'timetable'>('home');
   const lvl = prof.school_level;
   const mode = prof.missing_category_mode;
   const d = d0 ? { ...d0, subjects: d0.subjects.filter(x => lv(x) === lvl) } : null;
@@ -32,18 +32,20 @@ export default function Main({ user }: { user: User }) {
   }, [prof.theme]);
 
   const reload = useCallback(async () => {
-    const [s, c, g, pr, se] = await Promise.all([
+    const [s, c, g, pr, se, pe, sl] = await Promise.all([
       supabase.from('subjects').select('*').order('sort_order').order('created_at'),
       supabase.from('categories').select('*').order('created_at'),
       supabase.from('grades').select('*').order('graded_on', { ascending: false }),
       supabase.from('profiles').select('*').eq('id', user.id).maybeSingle(),
       supabase.from('semesters').select('*').order('sort_order'),
+      supabase.from('periods').select('*').order('nr'),
+      supabase.from('timetable_entries').select('*'),
     ]);
     const e = s.error || c.error || g.error || se.error;
     if (e) { setErr('Daten konnten nicht geladen werden: ' + e.message + ' (Wurde die SQL-Datei ausgeführt?)'); return; }
     setErr('');
     if (pr.data) setProf({ half_points: !!pr.data.half_points, theme: pr.data.theme, missing_category_mode: pr.data.missing_category_mode, school_level: pr.data.school_level === 'mittelstufe' ? 'mittelstufe' : 'oberstufe', default_weights: Array.isArray(pr.data.default_weights) ? pr.data.default_weights : DEFAULT_WEIGHTS });
-    setD0({ sems: se.data as Semester[], subjects: s.data as Subject[], cats: (c.data as Cat[]).map(x => ({ ...x, weight: Number(x.weight) })), grades: (g.data as Grade[]).map(x => ({ ...x, points: Number(x.points) })) });
+    setD0({ periods: pe.error ? [] : (pe.data as Period[]), slots: sl.error ? [] : (sl.data as Slot[]), ttMissing: !!(pe.error || sl.error), sems: se.data as Semester[], subjects: s.data as Subject[], cats: (c.data as Cat[]).map(x => ({ ...x, weight: Number(x.weight) })), grades: (g.data as Grade[]).map(x => ({ ...x, points: Number(x.points) })) });
   }, [user.id]);
   useEffect(() => { reload(); }, [reload]);
   const savePref = (patch: Partial<Profile>) => { setProf({ ...prof, ...patch }); run(supabase.from('profiles').upsert({ id: user.id, ...patch })); };
@@ -80,7 +82,7 @@ export default function Main({ user }: { user: User }) {
 
   const header = (
     <div className="row sp"><h1>MSS Grade Tracker</h1>
-      <span className="row"><span className="mut">{user.email}</span><button onClick={() => { setSel(null); setView('settings'); }}>Einstellungen</button><button onClick={() => supabase.auth.signOut()}>Abmelden</button></span></div>
+      <span className="row"><span className="mut">{user.email}</span><button onClick={() => { setSel(null); setView('timetable'); }}>Stundenplan</button><button onClick={() => { setSel(null); setView('settings'); }}>Einstellungen</button><button onClick={() => supabase.auth.signOut()}>Abmelden</button></span></div>
   );
   if (!d) return <main>{header}{err ? <div className="alert" role="alert">{err}</div> : <p>Lädt …</p>}</main>;
   const subject = d.subjects.find(s => s.id === sel);
@@ -88,6 +90,7 @@ export default function Main({ user }: { user: User }) {
     return <main>{header}{err && <div className="alert" role="alert">{err}</div>}
       <SubjectView s={subject} cats={d.cats.filter(c => c.subject_id === subject.id)} grades={d.grades.filter(g => g.subject_id === subject.id)} run={run} setErr={setErr} back={() => setSel(null)} half={prof.half_points} mode={prof.missing_category_mode} sems={d.sems} save={saveSubject} /></main>;
 
+  if (view === 'timetable') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Timetable d={d} subjects={(d0 as Data).subjects} run={run} setErr={setErr} back={() => setView('home')} /></main>;
   if (view === 'settings') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Settings prof={prof} save={savePref} all={d0 as Data} back={() => setView('home')} /></main>;
   const results = d.subjects.map(s => ({ s, r: scoreOf(d.cats.filter(c => c.subject_id === s.id), d.grades.filter(g => g.subject_id === s.id), prof.missing_category_mode) }));
   const ok = results.filter(x => x.r.score !== null);
@@ -341,5 +344,74 @@ function SubjectForm({ init, sems, onSave, onCancel }: { init: Subject | null; s
       {msg && <div className="alert" role="alert">{msg}</div>}
       <p className="row"><button className="pri" disabled={busy}>Speichern</button><button type="button" onClick={onCancel}>Abbrechen</button></p>
     </form>
+  );
+}
+
+const DAYS = ['Mo', 'Di', 'Mi', 'Do', 'Fr'];
+const hm = (t: string) => t.slice(0, 5);
+const addMin = (t: string, m: number) => {
+  const [h, mi] = t.split(':').map(Number);
+  const x = Math.min(23 * 60 + 59, h * 60 + mi + m);
+  return String(Math.floor(x / 60)).padStart(2, '0') + ':' + String(x % 60).padStart(2, '0');
+};
+function Timetable({ d, subjects, run, setErr, back }: { d: Data; subjects: Subject[]; run: (p: Res) => Promise<void>; setErr: (m: string) => void; back: () => void }) {
+  const periods = [...d.periods].sort((a, b) => a.nr - b.nr);
+  const [edit, setEdit] = useState(periods.length === 0);
+  const today = new Date().getDay();
+  const slotOf = (day: number, pid: string) => d.slots.find(x => x.weekday === day && x.period_id === pid);
+  const setSlot = (day: number, pid: string, sid: string) =>
+    run(sid
+      ? supabase.from('timetable_entries').upsert({ weekday: day, period_id: pid, subject_id: sid }, { onConflict: 'weekday,period_id' })
+      : supabase.from('timetable_entries').delete().eq('weekday', day).eq('period_id', pid));
+  const addPeriod = () => {
+    const last = periods[periods.length - 1];
+    const start = last ? hm(last.end_time) : '08:00';
+    run(supabase.from('periods').insert({ nr: (last?.nr ?? 0) + 1, start_time: start, end_time: addMin(start, 45) }));
+  };
+  const upd = (p: Period, patch: { start_time?: string; end_time?: string }) => {
+    const n = { start_time: hm(p.start_time), end_time: hm(p.end_time), ...patch };
+    if (n.end_time <= n.start_time) return setErr('Das Ende muss nach dem Beginn liegen.');
+    setErr('');
+    run(supabase.from('periods').update(n).eq('id', p.id));
+  };
+  return (
+    <>
+      <p><button onClick={back}>← Zurück</button></p>
+      <div className="row sp"><h2>Stundenplan</h2><button onClick={() => setEdit(!edit)}>{edit ? 'Zeiten fertig' : 'Zeiten bearbeiten'}</button></div>
+      {d.ttMissing && <div className="alert" role="alert">Der Stundenplan braucht eine Datenbank-Erweiterung: Führe die Datei 0003_timetable.sql im Supabase SQL Editor aus.</div>}
+      {!subjects.length && <div className="alert">Lege zuerst Fächer an, damit du sie den Stunden zuweisen kannst.</div>}
+      {edit && (
+        <div className="card"><h3>Zeiten der Stunden</h3>
+          <div className="tw"><table><thead><tr><th>Stunde</th><th>Von</th><th>Bis</th><th></th></tr></thead><tbody>
+            {periods.map((p, i) => (
+              <tr key={p.id + p.start_time + p.end_time}>
+                <td>{i + 1}.</td>
+                <td><input type="time" aria-label={`Beginn der ${i + 1}. Stunde`} defaultValue={hm(p.start_time)} onBlur={e => { if (e.target.value && e.target.value !== hm(p.start_time)) upd(p, { start_time: e.target.value }); }} /></td>
+                <td><input type="time" aria-label={`Ende der ${i + 1}. Stunde`} defaultValue={hm(p.end_time)} onBlur={e => { if (e.target.value && e.target.value !== hm(p.end_time)) upd(p, { end_time: e.target.value }); }} /></td>
+                <td><button className="d" onClick={() => { if (confirm(`Stunde ${i + 1} samt Zuordnungen löschen?`)) run(supabase.from('periods').delete().eq('id', p.id)); }}>Entfernen</button>
+                  {i > 0 && hm(p.start_time) < hm(periods[i - 1].end_time) && <div className="alert">Überschneidet sich mit der Stunde davor.</div>}</td>
+              </tr>))}
+          </tbody></table></div>
+          <p><button className="pri" disabled={d.ttMissing} onClick={addPeriod}>Stunde hinzufügen</button></p>
+        </div>)}
+      {periods.length > 0 && (
+        <div className="card tw"><table><thead><tr><th>Stunde</th>{DAYS.map((x, i) => <th key={x} style={today === i + 1 ? { color: 'var(--ink)', textDecoration: 'underline' } : undefined}>{x}</th>)}</tr></thead><tbody>
+          {periods.map((p, i) => (
+            <tr key={p.id}>
+              <th scope="row">{i + 1}.<div className="mut small">{hm(p.start_time)}–{hm(p.end_time)}</div></th>
+              {DAYS.map((_, k) => {
+                const day = k + 1;
+                const sub = subjects.find(x => x.id === slotOf(day, p.id)?.subject_id);
+                return (
+                  <td key={day} style={{ minWidth: '6.5rem', borderLeft: sub ? `5px solid ${sub.color}` : undefined }}>
+                    <select aria-label={`${DAYS[k]}, ${i + 1}. Stunde`} value={sub?.id ?? ''} onChange={e => setSlot(day, p.id, e.target.value)} disabled={d.ttMissing}>
+                      <option value="">–</option>
+                      {subjects.map(x => <option key={x.id} value={x.id}>{x.short_name || x.name}</option>)}
+                    </select>
+                  </td>);
+              })}
+            </tr>))}
+        </tbody></table></div>)}
+    </>
   );
 }
