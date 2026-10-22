@@ -6,3 +6,5 @@ export type Grade = { id: string; subject_id: string; category_id: string; title
 export type Profile = { display_name: string | null; half_points: boolean; theme: 'light' | 'dark' | 'system'; missing_category_mode: 'renormalize' | 'strict'; school_level: Level; default_weights: { name: string; weight: number }[] };
 export type Period = { id: string; nr: number; start_time: string; end_time: string };
 export type Slot = { id: string; weekday: number; period_id: string; subject_id: string };
+export type Evt = { id: string; title: string; kind: string; subject_id: string | null; start_date: string; start_time: string | null; end_date: string | null; end_time: string | null; all_day: boolean; description: string | null; location: string | null; prep_status: 'nicht_begonnen' | 'in_bearbeitung' | 'gut_vorbereitet'; study_notes: string | null; remind: boolean };
+export type Topic = { id: string; event_id: string; text: string; done: boolean; sort_order: number };

@@ -2,12 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
 import { de } from './Auth';
+import Calendar, { UpcomingCard, notifyDue } from './Calendar';
+import Simulator from './Simulator';
 import { SCALE, isValidValue, normalizeWeights, scalePos, subjectScore, type Level, type MissingMode } from './lib/grades';
-import type { Cat, Grade, Period, Profile, Semester, Slot, Subject } from './types';
+import type { Cat, Evt, Grade, Period, Profile, Semester, Slot, Subject, Topic } from './types';
 
 const f = (n: number | null) => (n == null ? '–' : n.toLocaleString('de-DE', { maximumFractionDigits: 2 }));
 const DEFAULT_WEIGHTS = [{ name: 'Klausuren', weight: 50 }, { name: 'Mündliche Mitarbeit', weight: 30 }, { name: 'Tests', weight: 20 }];
-type Data = { sems: Semester[]; subjects: Subject[]; cats: Cat[]; grades: Grade[]; periods: Period[]; slots: Slot[]; ttMissing: boolean };
+type Data = { sems: Semester[]; subjects: Subject[]; cats: Cat[]; grades: Grade[]; periods: Period[]; slots: Slot[]; ttMissing: boolean; events: Evt[]; topics: Topic[]; eventsMissing: boolean };
+type View = 'home' | 'settings' | 'timetable' | 'simulator' | 'calendar';
 type SubjectValues = { name: string; short_name: string; kind: 'grundfach' | 'leistungsfach'; color: string; semester: string };
 const lv = (s: Subject): Level => s.level ?? 'oberstufe';
 const semOf = (sems: Semester[], s: Subject) => sems.find(x => x.id === s.semester_id)?.label;
@@ -24,7 +27,10 @@ export default function Main({ user }: { user: User }) {
   const [creating, setCreating] = useState(false);
   const [sorting, setSorting] = useState(false);
   const [prof, setProf] = useState<Profile>({ display_name: null, half_points: false, theme: 'system', missing_category_mode: 'renormalize', school_level: 'oberstufe', default_weights: DEFAULT_WEIGHTS });
-  const [view, setView] = useState<'home' | 'settings' | 'timetable'>('home');
+  const [view, setView] = useState<View>('home');
+  const [openEvent, setOpenEvent] = useState<string | null>(null);
+  const [newEvent, setNewEvent] = useState(false);
+  useEffect(() => { if (d0) notifyDue(d0.events); }, [d0]);
   const lvl = prof.school_level;
   const mode = prof.missing_category_mode;
   const d = d0 ? { ...d0, subjects: d0.subjects.filter(x => lv(x) === lvl) } : null;
@@ -34,7 +40,7 @@ export default function Main({ user }: { user: User }) {
   }, [prof.theme]);
 
   const reload = useCallback(async () => {
-    const [s, c, g, pr, se, pe, sl] = await Promise.all([
+    const [s, c, g, pr, se, pe, sl, ev, tp] = await Promise.all([
       supabase.from('subjects').select('*').order('sort_order').order('created_at'),
       supabase.from('categories').select('*').order('created_at'),
       supabase.from('grades').select('*').order('graded_on', { ascending: false }),
@@ -42,6 +48,8 @@ export default function Main({ user }: { user: User }) {
       supabase.from('semesters').select('*').order('sort_order'),
       supabase.from('periods').select('*').order('nr'),
       supabase.from('timetable_entries').select('*'),
+      supabase.from('events').select('*').order('start_date'),
+      supabase.from('event_topics').select('*').order('sort_order'),
     ]);
     const e = s.error || c.error || g.error || se.error;
     if (e) { setErr('Daten konnten nicht geladen werden: ' + e.message + ' (Wurde die SQL-Datei ausgeführt?)'); return; }
@@ -55,7 +63,7 @@ export default function Main({ user }: { user: User }) {
       setProf(p => ({ ...p, display_name: meta }));
     }
     synced.current = true;
-    setD0({ periods: pe.error ? [] : (pe.data as Period[]), slots: sl.error ? [] : (sl.data as Slot[]), ttMissing: !!(pe.error || sl.error), sems: se.data as Semester[], subjects: s.data as Subject[], cats: (c.data as Cat[]).map(x => ({ ...x, weight: Number(x.weight) })), grades: (g.data as Grade[]).map(x => ({ ...x, points: Number(x.points) })) });
+    setD0({ events: ev.error ? [] : (ev.data as Evt[]), topics: tp.error ? [] : (tp.data as Topic[]), eventsMissing: !!(ev.error || tp.error), periods: pe.error ? [] : (pe.data as Period[]), slots: sl.error ? [] : (sl.data as Slot[]), ttMissing: !!(pe.error || sl.error), sems: se.data as Semester[], subjects: s.data as Subject[], cats: (c.data as Cat[]).map(x => ({ ...x, weight: Number(x.weight) })), grades: (g.data as Grade[]).map(x => ({ ...x, points: Number(x.points) })) });
   }, [user.id]);
   useEffect(() => { reload(); }, [reload]);
   const savePref = (patch: Partial<Profile>) => { setProf({ ...prof, ...patch }); run(supabase.from('profiles').upsert({ id: user.id, ...patch })); };
@@ -90,9 +98,16 @@ export default function Main({ user }: { user: User }) {
     await run(Promise.resolve({ error: rs.find(x => x.error)?.error ?? null }));
   }
 
+  const go = (v: View) => { setSel(null); setOpenEvent(null); setNewEvent(false); setView(v); };
   const header = (
-    <div className="row sp"><h1>MSS Grade Tracker</h1>
-      <span className="row"><span className="mut">{prof.display_name || user.email}</span><button onClick={() => { setSel(null); setView('timetable'); }}>Stundenplan</button><button onClick={() => { setSel(null); setView('settings'); }}>Einstellungen</button><button onClick={() => supabase.auth.signOut()}>Abmelden</button></span></div>
+    <>
+      <div className="row sp"><h1>MSS Grade Tracker</h1>
+        <span className="row"><span className="mut">{prof.display_name || user.email}</span><button onClick={() => supabase.auth.signOut()}>Abmelden</button></span></div>
+      <nav className="row" aria-label="Hauptnavigation" style={{ marginBottom: '1rem' }}>
+        {([['home', 'Übersicht'], ['simulator', 'Noten-Simulator'], ['calendar', 'Kalender'], ['timetable', 'Stundenplan'], ['settings', 'Einstellungen']] as const).map(([v, l]) => (
+          <button key={v} className={view === v && !sel ? 'pri' : ''} aria-current={view === v && !sel ? 'page' : undefined} onClick={() => go(v)}>{l}</button>))}
+      </nav>
+    </>
   );
   if (!d) return <main>{header}{err ? <div className="alert" role="alert">{err}</div> : <p>Lädt …</p>}</main>;
   const subject = d.subjects.find(s => s.id === sel);
@@ -100,6 +115,8 @@ export default function Main({ user }: { user: User }) {
     return <main>{header}{err && <div className="alert" role="alert">{err}</div>}
       <SubjectView s={subject} cats={d.cats.filter(c => c.subject_id === subject.id)} grades={d.grades.filter(g => g.subject_id === subject.id)} run={run} setErr={setErr} back={() => setSel(null)} half={prof.half_points} mode={prof.missing_category_mode} sems={d.sems} save={saveSubject} /></main>;
 
+  if (view === 'simulator') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Simulator subjects={d.subjects} cats={d.cats} grades={d.grades} mode={mode} half={prof.half_points} level={lvl} back={() => setView('home')} /></main>;
+  if (view === 'calendar') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Calendar key={openEvent ?? (newEvent ? 'neu' : 'kalender')} events={d.events} topics={d.topics} subjects={(d0 as Data).subjects} missing={d.eventsMissing} run={run} setErr={setErr} initialOpen={openEvent} initialNew={newEvent} back={() => setView('home')} /></main>;
   if (view === 'timetable') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Timetable d={d} subjects={(d0 as Data).subjects} run={run} setErr={setErr} back={() => setView('home')} /></main>;
   if (view === 'settings') return <main>{header}{err && <div className="alert" role="alert">{err}</div>}<Settings email={user.email ?? ''} prof={prof} save={savePref} all={d0 as Data} back={() => setView('home')} /></main>;
   const results = d.subjects.map(s => ({ s, r: scoreOf(d.cats.filter(c => c.subject_id === s.id), d.grades.filter(g => g.subject_id === s.id), prof.missing_category_mode) }));
@@ -111,6 +128,7 @@ export default function Main({ user }: { user: User }) {
         <div className="big">{f(avg)} <span className="mut" style={{ fontSize: '1rem' }}>Ø {SCALE[lvl].unit}</span></div>
         <p className="mut">{lvl === 'oberstufe' ? 'Oberstufe (Punkte)' : 'Mittelstufe (Noten)'}. Aus {ok.length} von {d.subjects.length} Fächern. {avg != null && lvl === 'oberstufe' && <>Näherung Note: {f((17 - avg) / 3)} (keine offizielle Abiturprognose).</>}</p>
       </div>
+      {!d.eventsMissing && <UpcomingCard events={d.events} subjects={(d0 as Data).subjects} onOpen={id => { setSel(null); setNewEvent(false); setOpenEvent(id); setView('calendar'); }} onAdd={() => { setSel(null); setOpenEvent(null); setNewEvent(true); setView('calendar'); }} />}
       {creating
         ? <SubjectForm init={null} sems={d.sems} onSave={v => saveSubject(v)} onCancel={() => setCreating(false)} />
         : <div className="row sp" style={{ marginBottom: '1rem' }}><h2 style={{ margin: 0 }}>Fächer</h2>
