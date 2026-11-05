@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { SCALE, isValidValue, scalePos, type Level, type MissingMode } from './lib/grades';
+import { ROLE_LABEL, SCALE, isValidValue, scalePos, type AlRatio, type Level, type MissingMode } from './lib/grades';
 import { requiredValue, simulate } from './lib/simulate';
 import type { Cat, Grade, Subject } from './types';
 
@@ -21,13 +21,14 @@ export default function Simulator({ subjects, cats, grades, mode, half, level, b
   if (!subject)
     return <><p><button onClick={back}>← Zurück</button></p><h2>Noten-Simulator</h2><div className="card"><p>Lege zuerst ein Fach mit Noten an, dann kannst du hier ausprobieren, wie sich eine Note auswirkt.</p></div></>;
 
-  const sCats = cats.filter(c => c.subject_id === subject.id).map(c => ({ id: c.id, name: c.name, weight: c.weight, active: c.active }));
+  const ratio: AlRatio = Number(subject.al_ratio) === 2 ? 2 : 1;
+  const sCats = cats.filter(c => c.subject_id === subject.id).map(c => ({ id: c.id, name: c.name, role: c.role, factor: c.factor, active: c.active }));
   const sGrades = grades.filter(g => g.subject_id === subject.id).map(g => ({ categoryId: g.category_id, points: g.points }));
   const catId = sCats.some(c => c.id === cid) ? cid : sCats[0]?.id ?? '';
   const cat = sCats.find(c => c.id === catId);
   const v = Number(val.replace(',', '.'));
   const valid = val !== '' && isValidValue(v, level, half);
-  const sim = cat && valid ? simulate(sCats, sGrades, catId, v, mode) : null;
+  const sim = cat && valid ? simulate(sCats, sGrades, catId, v, mode, ratio) : null;
   const better = (d: number) => (level === 'oberstufe' ? d > 0 : d < 0);
   const unit = level === 'oberstufe' ? 'Punkte' : '';
   const dtxt = (d: number | null) =>
@@ -35,15 +36,13 @@ export default function Simulator({ subjects, cats, grades, mode, half, level, b
   const bar = (x: number | null) => <div className="bar" aria-hidden><i style={{ width: `${x === null ? 0 : scalePos(x, level) * 100}%` }} /></div>;
   const reset = () => { setVal(startVal); setTitle(''); setCustom([]); setCval(''); setTarget(''); };
 
-  const usedW = sim ? sim.after.steps.filter(s => s.used).reduce((a, s) => a + s.weight, 0) : 0;
-  const effW = sim && cat && usedW > 0 && cat.active ? (cat.weight / usedW) * 100 : null;
   const base = level === 'oberstufe' ? [6, 8, 10, 12, 15] : [1, 2, 3, 4, 5, 6];
   const scen = [...base, ...custom.filter(x => !base.includes(x))].sort((a, b) => a - b);
   const t = Number(target.replace(',', '.'));
   const hasTarget = target !== '' && Number.isFinite(t) && !!cat;
-  const req = hasTarget && cat ? requiredValue(sCats, sGrades, catId, t, mode, level, half) : null;
+  const req = hasTarget && cat ? requiredValue(sCats, sGrades, catId, t, mode, level, half, ratio) : null;
   const bestVal = level === 'oberstufe' ? sc.max : sc.min;
-  const best = hasTarget && cat ? simulate(sCats, sGrades, catId, bestVal, mode).after : null;
+  const best = hasTarget && cat ? simulate(sCats, sGrades, catId, bestVal, mode, ratio).after : null;
   const stepTxt = half ? 'in Schritten von 0,5' : 'als ganze Zahl';
 
   return (
@@ -57,7 +56,7 @@ export default function Simulator({ subjects, cats, grades, mode, half, level, b
           <div style={{ flex: 1, minWidth: '10rem' }}><label htmlFor="ss">Fach</label>
             <select id="ss" value={subject.id} onChange={e => { setSid(e.target.value); setCid(''); }}>{subjects.map(s => <option key={s.id} value={s.id}>{s.short_name ? `${s.short_name} – ${s.name}` : s.name}</option>)}</select></div>
           <div style={{ flex: 1, minWidth: '10rem' }}><label htmlFor="sk">Kategorie</label>
-            <select id="sk" value={catId} onChange={e => setCid(e.target.value)}>{sCats.map(c => <option key={c.id} value={c.id}>{c.name} ({f(c.weight)} %)</option>)}</select></div>
+            <select id="sk" value={catId} onChange={e => setCid(e.target.value)}>{sCats.map(c => <option key={c.id} value={c.id}>{c.name} ({ROLE_LABEL[c.role]}, Faktor {f(c.factor)})</option>)}</select></div>
         </div>
         {!sCats.length && <div className="alert">Dieses Fach hat noch keine Kategorien. Lege sie im Fach an.</div>}
         {!sGrades.length && sCats.length > 0 && <div className="note-box">Dieses Fach hat noch keine Noten. Die Simulation zeigt dann nur das Ergebnis mit der simulierten Note.</div>}
@@ -74,25 +73,28 @@ export default function Simulator({ subjects, cats, grades, mode, half, level, b
 
       {sim && cat && (
         <>
-          {!sim.after.valid && <div className="alert" role="alert">{sim.after.reason} Passe die Gewichtungen im Fach an, bis sie genau 100 % ergeben, dann kann der Simulator rechnen.</div>}
+          {!sim.after.valid && <div className="alert" role="alert">{sim.after.reason} Korrigiere das im Fach, dann kann der Simulator rechnen.</div>}
           {!cat.active && <div className="alert">Die Kategorie „{cat.name}“ ist inaktiv und zählt deshalb nicht zum Fachergebnis.</div>}
-          {sim.catBefore === null && sim.after.valid && <div className="note-box">In „{cat.name}“ gibt es noch keine Note. Mit der simulierten Note zählt die Kategorie erstmals mit{mode === 'renormalize' ? ', die übrigen Gewichte werden entsprechend neu verteilt' : ''}.</div>}
+          {sim.catBefore === null && sim.after.valid && <div className="note-box">In „{cat.name}“ gibt es noch keine Note. Mit der simulierten Note zählt die Kategorie erstmals mit.</div>}
+          {sim.partBefore === null && sim.after.valid && <div className="note-box">Im Bereich {ROLE_LABEL[sim.role]} gibt es noch keine Note. Mit der simulierten Note fließt er erstmals ins Fachergebnis ein{sim.before.score !== null ? ' (bisher war das Ergebnis vorläufig)' : ''}.</div>}
           <div className="grid" style={{ marginBottom: '1rem' }}>
             <div className="card"><h3>Aktuell</h3><div className="big">{f(sim.before.score)}</div><div className="mut small">{sc.unit} im Fach</div>{bar(sim.before.score)}
-              <p className="small">Ø „{cat.name}“: <b>{f(sim.catBefore)}</b></p>{sim.before.reason && <p className="mut small">{sim.before.reason}</p>}</div>
+              <p className="small">Ø „{cat.name}“: <b>{f(sim.catBefore)}</b></p>
+              <p className="small">{ROLE_LABEL[sim.role]}-Ø: <b>{f(sim.partBefore)}</b> · Klausur : AL = 1 : {ratio}</p>{sim.before.reason && <p className="mut small">{sim.before.reason}</p>}</div>
             <div className="card"><h3>Simuliert{title.trim() ? `: ${title.trim()}` : ''}</h3><div className="big">{f(sim.after.score)}</div><div className="mut small">{sc.unit} im Fach</div>{bar(sim.after.score)}
-              <p className="small">Ø „{cat.name}“: <b>{f(sim.catAfter)}</b></p></div>
+              <p className="small">Ø „{cat.name}“: <b>{f(sim.catAfter)}</b></p>
+              <p className="small">{ROLE_LABEL[sim.role]}-Ø: <b>{f(sim.partAfter)}</b></p></div>
           </div>
           <div className="card" aria-live="polite"><h3>Veränderung</h3>
             <p className="big" style={{ fontSize: '1.6rem' }}>{dtxt(sim.delta)}</p>
-            <p>Verwendete Gewichtung: „{cat.name}“ zählt <b>{f(cat.weight)} %</b>{effW !== null && Math.abs(effW - cat.weight) > 0.05 ? <> (bei der aktuellen Verteilung effektiv {f(effW)} %)</> : null}.</p>
+            <p>Verwendete Gewichtung: Jede Note in „{cat.name}“ zählt mit dem Faktor <b>{f(cat.factor)}</b> im Bereich {ROLE_LABEL[sim.role]}. Klausur : AL = <b>1 : {ratio}</b>.</p>
             {sim.after.valid && (
-              <div className="tw"><table><thead><tr><th>Kategorie</th><th>Gewicht</th><th>Ø vorher</th><th>Ø nachher</th><th>Zählt</th></tr></thead><tbody>
+              <div className="tw"><table><thead><tr><th>Kategorie</th><th>Bereich</th><th>Faktor</th><th>Ø vorher</th><th>Ø nachher</th><th>Zählt</th></tr></thead><tbody>
                 {sim.after.steps.map(s => { const b = sim.before.steps.find(x => x.category === s.category); return (
-                  <tr key={s.category}><td>{s.category}{s.category === cat.name ? ' (simuliert)' : ''}</td><td>{f(s.weight)} %</td><td>{f(b?.average ?? null)}</td><td>{f(s.average)}</td><td>{s.used ? 'ja' : 'nein'}</td></tr>); })}
+                  <tr key={s.category}><td>{s.category}{s.category === cat.name ? ' (simuliert)' : ''}</td><td>{ROLE_LABEL[s.role]}</td><td>×{f(s.factor)}</td><td>{f(b?.average ?? null)}</td><td>{f(s.average)}</td><td>{s.used ? 'ja' : 'nein'}</td></tr>); })}
               </tbody></table></div>)}
             <details><summary>So wird gerechnet</summary>
-              <p className="small">Die simulierte Note wird testweise zu den vorhandenen Noten der Kategorie „{cat.name}“ hinzugefügt. Der Kategorie-Durchschnitt ist das Mittel aller Noten dieser Kategorie ({f(sim.catBefore)} → {f(sim.catAfter)}). Das Fachergebnis ist die Summe aus Kategorie-Durchschnitt × Gewicht, geteilt durch die Summe der berücksichtigten Gewichte. Das ist dieselbe Berechnung wie im Fach selbst. Einzelne Noten werden nicht zusätzlich gewichtet.</p></details>
+              <p className="small">Die simulierte Note wird testweise zu den Noten der Kategorie „{cat.name}“ hinzugefügt und zählt mit deren Faktor ({f(cat.factor)}). Der Bereichsdurchschnitt ist Σ (Note × Faktor) ÷ Σ Faktoren, deshalb zählt eine Note mit Faktor 2 doppelt so viel wie eine mit Faktor 1. Das Fachergebnis ist (Klausur × 1 + AL × {ratio}) ÷ {1 + ratio}, mit dem im Fach eingestellten Verhältnis. Das ist dieselbe Berechnung wie im Fach selbst.</p></details>
           </div>
         </>)}
 
@@ -100,7 +102,7 @@ export default function Simulator({ subjects, cats, grades, mode, half, level, b
         <div className="card"><h3>Szenarien vergleichen</h3>
           <p className="mut small">Ergebnis im Fach, wenn die nächste Note in „{cat.name}“ so ausfällt:</p>
           <div className="tw"><table><thead><tr><th>{sc.unit} in der Note</th><th>Fachergebnis</th><th>Veränderung</th><th></th></tr></thead><tbody>
-            {scen.map(x => { const r = simulate(sCats, sGrades, catId, x, mode); return (
+            {scen.map(x => { const r = simulate(sCats, sGrades, catId, x, mode, ratio); return (
               <tr key={x}><td>{f(x)}</td><td>{f(r.after.score)}</td><td>{dtxt(r.delta)}</td><td>{custom.includes(x) && <button onClick={() => setCustom(custom.filter(y => y !== x))} aria-label={`Szenario ${f(x)} entfernen`}>Entfernen</button>}</td></tr>); })}
           </tbody></table></div>
           <div className="row" style={{ marginTop: '.6rem' }}>
