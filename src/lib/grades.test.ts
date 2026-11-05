@@ -1,38 +1,69 @@
 import { describe, it, expect } from 'vitest';
-import { categoryAverage, isValidPoints, isValidValue, normalizeWeights, scalePos, subjectScore, type Category } from './grades';
+import { categoryAverage, isValidPoints, isValidValue, scalePos, subjectScore, type Category } from './grades';
+
 const cats: Category[] = [
-  { id: 'k', name: 'Klausuren', weight: 50, active: true },
-  { id: 'm', name: 'Mündlich', weight: 30, active: true },
-  { id: 't', name: 'Tests', weight: 20, active: true },
+  { id: 'k', name: 'Klausuren', role: 'klausur', factor: 1, active: true },
+  { id: 'm', name: 'Mündlich', role: 'al', factor: 2, active: true },
+  { id: 't', name: 'Tests', role: 'al', factor: 1, active: true },
 ];
-describe('grades', () => {
-  it('validiert Punkte inkl. Grenzen und halbe Punkte', () => {
-    expect(isValidPoints(0)).toBe(true); expect(isValidPoints(15)).toBe(true);
-    expect(isValidPoints(15.5)).toBe(false); expect(isValidPoints(7.5)).toBe(false); expect(isValidPoints(7.5, true)).toBe(true);
+const g = (c: string, p: number) => ({ categoryId: c, points: p });
+
+describe('AL-System', () => {
+  it('mündliche Note zählt doppelt so viel wie ein Test', () => {
+    const r = subjectScore(cats, [g('m', 12), g('t', 6)]);
+    expect(r.al).toBeCloseTo(10); // (12*2 + 6*1) / 3, nicht 9
   });
-  it('unterscheidet leere Kategorie von 0 Punkten', () => {
-    expect(categoryAverage([], 'k')).toBeNull();
-    expect(categoryAverage([{ categoryId: 'k', points: 0 }], 'k')).toBe(0);
+  it('der Faktor gilt pro Note, nicht pro Kategorie-Durchschnitt', () => {
+    const r = subjectScore(cats, [g('m', 12), g('m', 8), g('t', 6)]);
+    expect(r.al).toBeCloseTo(9.2); // (24 + 16 + 6) / 5
+    expect(r.alSum).toBeCloseTo(46); expect(r.alW).toBe(5);
   });
-  it('berechnet gewichtet (vollstaendig)', () => {
-    const r = subjectScore(cats, [{ categoryId: 'k', points: 10 }, { categoryId: 'm', points: 12 }, { categoryId: 't', points: 5 }]);
-    expect(r.score).toBeCloseTo(9.6); expect(r.complete).toBe(true);
+  it('Klausur 1:1 AL', () => {
+    const r = subjectScore(cats, [g('k', 9), g('m', 12), g('t', 6)], 'renormalize', 1);
+    expect(r.klausur).toBe(9); expect(r.al).toBeCloseTo(10); expect(r.score).toBeCloseTo(9.5); expect(r.complete).toBe(true);
+    expect(r.shares?.klausur).toBeCloseTo(0.5);
   });
-  it('gewichtet fehlende Kategorien neu und markiert unvollstaendig', () => {
-    const r = subjectScore(cats, [{ categoryId: 'k', points: 10 }, { categoryId: 'm', points: 10 }]);
-    expect(r.score).toBeCloseTo(10); expect(r.complete).toBe(false);
+  it('Klausur 1:2 AL', () => {
+    const r = subjectScore(cats, [g('k', 9), g('m', 12), g('t', 6)], 'renormalize', 2);
+    expect(r.score).toBeCloseTo(29 / 3); expect(r.shares?.al).toBeCloseTo(2 / 3);
   });
-  it('strict liefert kein Ergebnis bei fehlenden Kategorien', () => {
-    expect(subjectScore(cats, [{ categoryId: 'k', points: 10 }], 'strict').score).toBeNull();
+  it('Bereich ohne Noten: nur der vorhandene Bereich zählt und das Ergebnis ist vorläufig', () => {
+    const r = subjectScore(cats, [g('m', 12), g('t', 6)], 'renormalize', 2);
+    expect(r.score).toBeCloseTo(10); expect(r.complete).toBe(false); expect(r.klausur).toBeNull();
+    expect(r.steps.find(s => s.category === 'Klausuren')?.used).toBe(false);
   });
-  it('lehnt ungueltige Gewichtssumme ab und normalisiert', () => {
-    const bad = cats.map(c => ({ ...c, weight: c.weight / 2 }));
-    expect(subjectScore(bad, []).valid).toBe(false);
-    expect(subjectScore(normalizeWeights(bad), [{ categoryId: 'k', points: 15 }]).score).toBe(15);
+  it('strenger Modus: kein Ergebnis, solange ein Bereich unbewertet ist', () => {
+    const r = subjectScore(cats, [g('m', 12)], 'strict', 1);
+    expect(r.score).toBeNull(); expect(r.reason).toContain('Klausur');
+  });
+  it('Fach ohne Klausur-Kategorie ist vollständig, wenn AL Noten hat', () => {
+    const r = subjectScore(cats.filter(c => c.role === 'al'), [g('m', 12), g('t', 6)], 'strict', 2);
+    expect(r.score).toBeCloseTo(10); expect(r.complete).toBe(true);
+  });
+  it('Fach ohne Noten und ohne Kategorien', () => {
+    expect(subjectScore(cats, []).score).toBeNull(); expect(subjectScore(cats, []).reason).toBe('Noch keine Noten.');
+    expect(subjectScore([], []).reason).toBe('Es gibt keine aktive Kategorie.');
+  });
+  it('ungültiger Faktor (0 oder negativ) liefert kein Ergebnis', () => {
+    const bad = cats.map(c => (c.id === 't' ? { ...c, factor: 0 } : c));
+    const r = subjectScore(bad, [g('t', 5)]);
+    expect(r.valid).toBe(false); expect(r.score).toBeNull();
+  });
+  it('inaktive Kategorien zählen nicht', () => {
+    const r = subjectScore(cats.map(c => (c.id === 't' ? { ...c, active: false } : c)), [g('m', 12), g('t', 3)]);
+    expect(r.al).toBeCloseTo(12);
+  });
+  it('Grenzwerte 0 und 15', () => {
+    expect(subjectScore(cats, [g('k', 0), g('m', 0), g('t', 0)]).score).toBe(0);
+    expect(subjectScore(cats, [g('k', 15), g('m', 15), g('t', 15)], 'renormalize', 2).score).toBeCloseTo(15);
+  });
+  it('0 Punkte sind etwas anderes als keine Note', () => {
+    expect(categoryAverage([], 'k')).toBeNull(); expect(categoryAverage([g('k', 0)], 'k')).toBe(0);
+    expect(subjectScore(cats, [g('k', 0), g('m', 12)], 'strict').score).toBeCloseTo(6);
   });
 });
-
 describe('Skalen', () => {
+  it('Punkte', () => { expect(isValidPoints(0)).toBe(true); expect(isValidPoints(15.5)).toBe(false); expect(isValidPoints(7.5, true)).toBe(true); });
   it('Mittelstufe erlaubt Noten 1 bis 6', () => {
     expect(isValidValue(1, 'mittelstufe')).toBe(true); expect(isValidValue(6, 'mittelstufe')).toBe(true);
     expect(isValidValue(0, 'mittelstufe')).toBe(false); expect(isValidValue(7, 'mittelstufe')).toBe(false);
